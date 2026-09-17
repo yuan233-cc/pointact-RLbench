@@ -4,6 +4,7 @@ import numpy as np
 from filelock import FileLock
 import jsonlines
 import imageio
+import subprocess
 
 import torch
 
@@ -71,10 +72,31 @@ def project_action_chunks_on_image(image, action_chunk, extrinsics, intrinsics, 
     return image
 
 def save_images_to_video(images, video_path, fps=20):
+    if not images:
+        return
 
-    imageio.mimwrite(
-        video_path, images, fps=fps, codec="libx264"
-    )
+    # Use the system ffmpeg directly so video export also works in lightweight
+    # RLBench environments without imageio-ffmpeg or PyAV.
+    first_frame = np.asarray(images[0])
+    height, width = first_frame.shape[:2]
+    command = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-s", f"{width}x{height}", "-r", str(fps),
+        "-i", "-", "-an", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", video_path,
+    ]
+    process = subprocess.Popen(command, stdin=subprocess.PIPE)
+    assert process.stdin is not None
+    for image in images:
+        frame = np.asarray(image)
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+        process.stdin.write(np.ascontiguousarray(frame).tobytes())
+    process.stdin.close()
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(f"ffmpeg failed with exit code {return_code}")
     
     # height, width = images[0].shape[:2]
 

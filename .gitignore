@@ -214,3 +214,11 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Local model weights and generated RLBench analysis artifacts.
+# Keep these on the workstation; they are too large/noisy for the source repo.
+/checkpoints/
+/pretrained/
+/PTV3_*/
+/RLBench_*_visualizations_*/
+/RLbench_results_*/

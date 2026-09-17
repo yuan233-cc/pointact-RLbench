@@ -18,7 +18,7 @@ from rlbench.backend.exceptions import InvalidActionError
 from rlbench.backend.utils import task_file_to_task_class
 
 from pointact.robot_envs.rlbench_utils.environments import (
-    Mover, RLBenchEnv,
+    CAMERA_ATTR, Mover, RLBenchEnv,
     get_robot_joints_pose_size
 )
 from pointact.robot_envs.rlbench_utils.eval_utils import (
@@ -71,6 +71,7 @@ class ClientArgs:
     
     # output
     save_video: bool = False
+    continuous_video_fps: float = 0.0
     save_obs_outs: bool = False
     project_action_on_image: bool = False
     save_dir: str = ""
@@ -84,6 +85,21 @@ def save_obs_state(output_dir, obs_id, obs_state_dict):
 def write_transition(output_dir, transition):
     with jsonlines.open(os.path.join(output_dir, "transitions.jsonl"), "a", flush=True) as outf:
         outf.write(transition)
+
+
+def rgb_to_uint8(image):
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.floating):
+        image = image * 255.0 if image.size and image.max() <= 1.0 else image
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+def observation_video_frame(obs_state_dict, select_cameras):
+    images = []
+    for cam_name in select_cameras:
+        cam_idx = CAMERA_NAMES.index(cam_name)
+        images.append(rgb_to_uint8(obs_state_dict["rgb"][cam_idx]))
+    return np.concatenate(images, 1)
 
 
 def is_action_similar(prev_action, action):
@@ -137,6 +153,45 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
     task.set_variation(variation_id)
     move = Mover(task, max_tries=10)
 
+    continuous_images = []
+    continuous_callback_step = 0
+    continuous_recording = False
+    continuous_frame_stride = 1
+    continuous_actual_fps = 0.0
+
+    if args.continuous_video_fps > 0:
+        simulation_dt = task._scene.pyrep.get_simulation_timestep()
+        continuous_frame_stride = max(
+            1, round(1.0 / (args.continuous_video_fps * simulation_dt))
+        )
+        continuous_actual_fps = 1.0 / (
+            continuous_frame_stride * simulation_dt
+        )
+
+        def take_continuous_snap():
+            nonlocal continuous_callback_step
+            if not continuous_recording:
+                return
+            continuous_callback_step += 1
+            if continuous_callback_step % continuous_frame_stride != 0:
+                return
+
+            images = []
+            for cam_name in args.select_cameras:
+                sensor = getattr(task._scene, CAMERA_ATTR[cam_name])
+                sensor.handle_explicitly()
+                images.append(rgb_to_uint8(sensor.capture_rgb()))
+            continuous_images.append(np.concatenate(images, 1))
+
+        task._scene.register_step_callback(take_continuous_snap)
+        print(
+            "continuous video",
+            f"requested={args.continuous_video_fps:g}Hz",
+            f"actual={continuous_actual_fps:g}Hz",
+            f"simulation_dt={simulation_dt:g}s",
+            f"stride={continuous_frame_stride}",
+        )
+
     if args.microstep_data_dir != "":
         episodes_dir = os.path.join(args.microstep_data_dir, task_str, f"variation{variation_id}", "episodes")
         demos = []
@@ -158,6 +213,9 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
     success_rate = 0
     for episode_id in tqdm(range(num_episodes)):
         replay_images = []
+        continuous_recording = False
+        continuous_images.clear()
+        continuous_callback_step = 0
 
         if demos is None:
             instructions, obs = task.reset()
@@ -171,6 +229,11 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
 
         obs_state_dict = env.get_observation(obs)
         move.reset(obs_state_dict["gripper"])
+        if args.continuous_video_fps > 0:
+            continuous_images.append(
+                observation_video_frame(obs_state_dict, args.select_cameras)
+            )
+            continuous_recording = True
 
         if args.save_obs_outs:
             output_dir = os.path.join(args.save_dir, "obs_outs", taskvar, f"episode_{episode_id:06d}")
@@ -364,6 +427,16 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
                 reward = 0
                 break
 
+        continuous_recording = False
+        if args.save_video:
+            replay_images.append(
+                observation_video_frame(obs_state_dict, args.select_cameras)
+            )
+        if args.continuous_video_fps > 0:
+            continuous_images.append(
+                observation_video_frame(obs_state_dict, args.select_cameras)
+            )
+
         print(
             taskvar, "Episode", episode_id, "Step", step_id+1,
             "Reward", reward, "Accumulated SR: %.2f" % (success_rate * 100), 
@@ -377,6 +450,37 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
             )
             os.makedirs(os.path.dirname(video_path), exist_ok=True)
             save_images_to_video(replay_images, video_path, fps=5)
+
+        continuous_video_path = None
+        if args.continuous_video_fps > 0:
+            reward_str = "success" if reward == 1 else "failure"
+            continuous_video_path = os.path.join(
+                args.save_dir,
+                "continuous_videos_2hz",
+                f"{taskvar}_episode_{episode_id:06d}_{reward_str}.mp4",
+            )
+            os.makedirs(os.path.dirname(continuous_video_path), exist_ok=True)
+            save_images_to_video(
+                continuous_images,
+                continuous_video_path,
+                fps=continuous_actual_fps,
+            )
+
+        if args.save_dir:
+            write_to_file(
+                os.path.join(args.save_dir, "episode_results.jsonl"),
+                {
+                    "task": task_str,
+                    "variation": variation_id,
+                    "episode": episode_id,
+                    "success": bool(reward == 1),
+                    "reward": float(reward),
+                    "policy_steps": step_id + 1,
+                    "keyframes": len(replay_images),
+                    "continuous_frames": len(continuous_images),
+                    "continuous_fps": continuous_actual_fps,
+                },
+            )
 
 
     print(f"Success Rate: {success_rate * 100:.2f}%")
@@ -394,8 +498,14 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
     env.env.shutdown()
     print(colored(f"Taskvar: {taskvar} SR: {success_rate:.2f}", "black", "on_yellow"))
 
-    producer_queue.put(proc_id)
-    
+
+
+def producer_entry(proc_id, args, taskvar, pred_file, producer_queue):
+    try:
+        producer_fn(proc_id, args, taskvar, pred_file, producer_queue)
+    finally:
+        producer_queue.put(proc_id)
+
 
 def main(args: ClientArgs) -> None:
 
@@ -410,6 +520,7 @@ def main(args: ClientArgs) -> None:
 
     existed_taskvars = set()
     if args.save_dir:
+        os.makedirs(args.save_dir, exist_ok=True)
         pred_file = os.path.join(args.save_dir, "results.jsonl")
         if os.path.exists(pred_file):
             with jsonlines.open(pred_file, "r") as f:
@@ -441,7 +552,7 @@ def main(args: ClientArgs) -> None:
         if len(producers) < args.num_workers:
             print("start", i, taskvar)
             producer = mp.Process(
-                target=producer_fn, 
+                target=producer_entry,
                 args=(i, args, taskvar, pred_file, producer_queue),
                 name=taskvar
             )
@@ -451,10 +562,19 @@ def main(args: ClientArgs) -> None:
         else:
             proc_id = producer_queue.get()
             producers[proc_id].join()
+            if producers[proc_id].exitcode != 0:
+                raise RuntimeError(
+                    f"RLBench worker {producers[proc_id].name} exited with "
+                    f"code {producers[proc_id].exitcode}"
+                )
             del producers[proc_id]
 
     for p in producers.values():
         p.join()
+        if p.exitcode != 0:
+            raise RuntimeError(
+                f"RLBench worker {p.name} exited with code {p.exitcode}"
+            )
 
 
 if __name__ == "__main__":
