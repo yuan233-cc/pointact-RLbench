@@ -67,6 +67,27 @@ else:
 print(f"Uploading to private dataset repo {repo_id}")
 PY
 
-HF_XET_HIGH_PERFORMANCE=1 hf upload "$repo_id" "$package_root" . \
-    --repo-type dataset --private \
-    --commit-message "Add ten-task aligned RLBench polar dataset"
+for attempt in 1 2 3; do
+    if HF_XET_HIGH_PERFORMANCE=1 hf upload "$repo_id" "$package_root" . \
+        --repo-type dataset --private \
+        --commit-message "Add ten-task aligned RLBench polar dataset"; then
+        break
+    fi
+    if [[ "$attempt" -eq 3 ]]; then
+        echo "Hugging Face upload failed after three attempts" >&2
+        exit 1
+    fi
+    sleep 120
+done
+
+"$pointact_python" - "$repo_id" "$dataset_name" <<'PY'
+import sys
+from huggingface_hub import HfApi
+repo_id, name = sys.argv[1:]
+files = set(HfApi().list_repo_files(repo_id, repo_type="dataset"))
+required = {f"{name}.zip", "SHA256SUMS", "README.md"}
+missing = required - files
+if missing:
+    raise SystemExit(f"Hugging Face upload incomplete: {sorted(missing)}")
+print(f"Verified remote files in {repo_id}")
+PY
