@@ -100,6 +100,34 @@ def make_clouds(frame_path: Path, task_index: int, episode_index: int,
     return clean, incomplete, final_pixels, original_pixels, stats
 
 
+def depth_alignment_report(expected: list[tuple[str, int, Path]]) -> dict:
+    """Summarize same-state Coppelia/native depth checks saved by the renderer."""
+    groups: dict[str, list[dict]] = {"all": []}
+    for task, _index, raw_episode in expected:
+        render = json.loads((raw_episode / "frames_spp512/render_summary.json").read_text())
+        records = [frame.get("alignment", {}) for frame in render["frames"]]
+        records = [record for record in records
+                   if record.get("depth_within_2cm_fraction") is not None]
+        groups.setdefault(task, []).extend(records)
+        groups["all"].extend(records)
+
+    report = {}
+    for name, records in groups.items():
+        if not records:
+            report[name] = {"checked_frames": 0}
+            continue
+        report[name] = {
+            "checked_frames": len(records),
+            "median_frame_depth_abs_median_m": float(np.median(
+                [record["depth_abs_median_m"] for record in records])),
+            "max_frame_depth_abs_p95_m": float(max(
+                record["depth_abs_p95_m"] for record in records)),
+            "min_frame_depth_within_2cm_fraction": float(min(
+                record["depth_within_2cm_fraction"] for record in records)),
+        }
+    return report
+
+
 def build_episode(dataset: LeRobotDataset, raw_episode: Path, task: str,
                   global_episode: int, task_index: int, seed: int,
                   voxel_size: float, transactions: dict[str, lmdb.Transaction],
@@ -234,6 +262,8 @@ def main() -> None:
     }
     (staging / "meta/polar_incomplete_features.json").write_text(
         json.dumps(metadata, indent=2) + "\n")
+    (staging / "meta/depth_alignment_qa.json").write_text(
+        json.dumps(depth_alignment_report(expected), indent=2) + "\n")
     shutil.copy2(MATERIALS, staging / "material_profiles_10tasks.json")
     (staging / "README.md").write_text(
         "# RLBench ten-task polar + incomplete-point-cloud dataset\n\n"
@@ -259,7 +289,9 @@ def main() -> None:
         "`frame_corruption_stats.jsonl` records per-frame failure statistics. "
         "`material_profiles_10tasks.json` contains the assumed optical materials; "
         "these are realistic starting values, not measured properties of the "
-        "RLBench assets. See `meta/polar_incomplete_features.json` for schema.\n",
+        "RLBench assets. `meta/depth_alignment_qa.json` summarizes same-state "
+        "Coppelia/native depth agreement for the rendered keyframes. See "
+        "`meta/polar_incomplete_features.json` for schema.\n",
         encoding="utf-8",
     )
     norm_path = staging / "robot_state_action_stats/euler_points_frontview_clf.json"
