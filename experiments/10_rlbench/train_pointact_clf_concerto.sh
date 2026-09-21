@@ -55,7 +55,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
     --output_dir "${output_dir}" \
     ${model_name_or_path:+--model-name-or-path $model_name_or_path} \
-    --vlm-name-or-path Qwen/Qwen2.5-VL-3B-Instruct \
+    --vlm-name-or-path "${VLM_PATH:-Qwen/Qwen2.5-VL-3B-Instruct}" \
     --data-path "${dataset}" \
     --chunk-size ${chunk_size} \
     --dataloader-num-workers 8 \
