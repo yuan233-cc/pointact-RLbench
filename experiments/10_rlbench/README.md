@@ -112,6 +112,10 @@ exact channel and action semantics. The training configuration is
 These are newly generated trajectories, so episode numbers do not match the
 original RGB-only dataset. Optical material parameters are assumptions stored
 with the export, and the full polar maps cover valid camera-visible pixels.
+`bash experiments/10_rlbench/finalize_10task_polar_dataset.sh` resumes the
+collection, exports and verifies the 1000-episode dataset, writes a checked ZIP
+archive, and uploads it to a private `yuan1119` Hugging Face dataset repository
+when that account is logged in locally.
 
 We support EO1, EO1-Point, QwenGR00T, QwenGR00T-Point, Pi0, and PointAct.
 For PointAct, you can switch between classification and regression action heads. You can also remove images from the VLM by setting `video_key_ids_for_vlm: []` in the data configuration file. In RLBench, the 3D point cloud alone is often sufficient for most tasks, so removing images can substantially speed up training, roughly 13 hours on 1 H100 GPU, while keeping comparable performance.
