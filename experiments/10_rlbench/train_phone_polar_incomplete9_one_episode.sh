@@ -17,6 +17,10 @@ ptv3_init_args=()
 if [[ -n "${PTV3_INIT_CKPT_FILE:-}" ]]; then
     ptv3_init_args=(--ptv3_init_ckpt_file "$PTV3_INIT_CKPT_FILE")
 fi
+max_steps_args=()
+if [[ -n "${MAX_STEPS:-}" ]]; then
+    max_steps_args=(--max_steps "$MAX_STEPS")
+fi
 
 accelerate launch --num_processes 1 --num_machines 1 scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
@@ -32,6 +36,7 @@ accelerate launch --num_processes 1 --num_machines 1 scripts/train.py \
     --tf32 True \
     --fp16 False \
     --num-train-epochs 1 \
+    "${max_steps_args[@]}" \
     --per-device-train-batch-size 1 \
     --learning-rate 5e-5 \
     --merger-lr 5e-5 \
