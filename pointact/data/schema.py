@@ -53,6 +53,7 @@ class LerobotConfig:
     max_npoints: int = 4096
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
     point_cloud_dirname: str | None = None
+    point_feature_mode: str = "xyzrgb"  # xyzrgb, xyzrgb_polar (DoLP, cos2AoLP, sin2AoLP)
 
     image_size: int | None = None
 

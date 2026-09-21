@@ -27,7 +27,8 @@ msgpack_numpy.patch()
 class LeRobotPointCloudDataset(LeRobotDatasetMixin):
     """LeRobot dataset variant backed by precomputed point clouds in LMDB.
 
-    Point cloud LMDB entries are xyzrgb with RGB in [0, 1]. 
+    Point cloud LMDB entries are xyzrgb with RGB in [0, 1]. The optional
+    xyzrgb_polar mode adds DoLP, cos(2 AoLP), and sin(2 AoLP) in that order.
     State/action tensors are treated as world-frame values before optional rotation augmentation and point-cloud centering.
     """
 
@@ -60,6 +61,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         max_npoints: int = 4096,
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
+        point_feature_mode: str = "xyzrgb",
         **kwargs,
     ):
         super().__init__(
@@ -89,6 +91,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.points_workspace = points_workspace
         self.max_npoints = max_npoints
         self.augment_pc_rot = augment_pc_rot
+        if point_feature_mode not in ("xyzrgb", "xyzrgb_polar"):
+            raise ValueError(f"Unsupported point_feature_mode={point_feature_mode!r}")
+        self.point_feature_mode = point_feature_mode
 
         assert point_cloud_dirname is not None
         self.point_cloud_dir = os.path.join(self.root, point_cloud_dirname)
@@ -169,7 +174,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         point_cloud = txn.get(point_key.encode("ascii"))
         if point_cloud is None:
             raise KeyError(f"Point cloud '{point_key}' not found in {self.point_cloud_dir}")
-        return msgpack.unpackb(point_cloud).copy().astype(np.float32)
+        point_cloud = np.asarray(msgpack.unpackb(point_cloud), dtype=np.float32).copy()
+        if self.point_feature_mode == "xyzrgb_polar":
+            if point_cloud.ndim != 2 or point_cloud.shape[1] != 9:
+                raise ValueError(
+                    f"Polar point cloud '{point_key}' must have shape Nx9 "
+                    f"[xyz, rgb, DoLP, cos2AoLP, sin2AoLP], got {point_cloud.shape}"
+                )
+            if not np.isfinite(point_cloud).all():
+                raise ValueError(f"Polar point cloud '{point_key}' has non-finite values")
+            if np.any((point_cloud[:, 6] < 0) | (point_cloud[:, 6] > 1)):
+                raise ValueError(f"Polar point cloud '{point_key}' has DoLP outside [0, 1]")
+            if np.any(np.abs(point_cloud[:, 7:9]) > 1.001):
+                raise ValueError(f"Polar point cloud '{point_key}' has invalid AoLP channels")
+        return point_cloud
 
     def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray):
         if self.points_workspace is None:

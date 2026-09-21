@@ -109,6 +109,13 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
             return
         if source.ndim == target.ndim == 2 and source.shape[0] == target.shape[0] and source.shape[1] >= target.shape[1]:
             state_dict[key] = source[:, : target.shape[1]]
+        elif source.ndim == target.ndim == 2 and source.shape[0] == target.shape[0] and source.shape[1] < target.shape[1]:
+            # Preserve a pretrained 6-channel stem when adding polar channels.
+            # Zero-initialized new weights keep the original model output at step 0
+            # and remain trainable through subsequent optimizer updates.
+            expanded = target.new_zeros(target.shape)
+            expanded[:, : source.shape[1]] = source
+            state_dict[key] = expanded
 
     checkpoint = torch.load(training_args.ptv3_init_ckpt_file, map_location="cpu")
     state_dict = checkpoint.get("state_dict", checkpoint)

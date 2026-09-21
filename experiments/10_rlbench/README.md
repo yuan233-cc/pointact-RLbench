@@ -73,6 +73,46 @@ python data_prep/prepare_robot_state_action_stats.py \
 
 ## Training
 
+For the aligned `phone_on_base` polar + incomplete-point-cloud example, run
+`python experiments/10_rlbench/create_phone_polar_incomplete_episode.py` from
+the repository root. The default output is
+`robot_data/rlbench/lerobot_point_lmdb/phone_on_base_1episode_polar_incomplete9_seed24`.
+It contains six keyframes from one successful episode. Its training LMDB stores
+`[x, y, z, r, g, b, DoLP, cos(2 AoLP), sin(2 AoLP)]` under
+`points_frontview_polar_incomplete9`; `points_frontview_polar_clean9` is a
+reference copy. After geometry corruption, RGB and polar are sampled at each
+point's current projected image pixel. Points projecting onto invalid polar
+pixels are omitted. The color augmentation applies only to RGB, and the
+example configuration disables geometry rotation because the polar angle is
+defined in the original camera frame. The original six-channel `xyzrgb` mode
+remains the default.
+
+The matching example configuration is
+`data_configs/data-phone-polar-incomplete9-one-episode.yaml`. On a machine with
+a CUDA GPU and the pretrained Qwen model available locally, run
+`bash experiments/10_rlbench/train_phone_polar_incomplete9_one_episode.sh` to
+exercise one training epoch with `--ptv3_input_channels 9`. Set
+`PTV3_INIT_CKPT_FILE` to a Concerto checkpoint to initialize its six original
+input channels and zero-initialize the three new polar weights. One episode is a
+training smoke test, not a useful final policy dataset.
+
+To build a fresh, aligned ten-task dataset (100 successful demonstrations per
+task), run `python experiments/10_rlbench/collect_10task_polar_episodes.py` on a
+machine with the local custom RLBench renderer and CoppeliaSim installation.
+The collector records each new successful trajectory once, saves only selected
+keyframe scene snapshots, and renders polar maps at 512 samples per pixel.
+It resumes episodes with completed `summary.json` and `render_summary.json`
+files. Then run `python experiments/10_rlbench/export_10task_polar_incomplete9.py`.
+The export creates a LeRobot dataset with separate LMDBs for incomplete nine
+channel training points, intact reference points, full front-camera polar maps,
+and original/current pixel indices. See the generated dataset README for the
+exact channel and action semantics. The training configuration is
+`data_configs/data-10task-polar-incomplete9.yaml`; run
+`bash experiments/10_rlbench/train_10task_polar_incomplete9.sh` after export.
+These are newly generated trajectories, so episode numbers do not match the
+original RGB-only dataset. Optical material parameters are assumptions stored
+with the export, and the full polar maps cover valid camera-visible pixels.
+
 We support EO1, EO1-Point, QwenGR00T, QwenGR00T-Point, Pi0, and PointAct.
 For PointAct, you can switch between classification and regression action heads. You can also remove images from the VLM by setting `video_key_ids_for_vlm: []` in the data configuration file. In RLBench, the 3D point cloud alone is often sufficient for most tasks, so removing images can substantially speed up training, roughly 13 hours on 1 H100 GPU, while keeping comparable performance.
 
