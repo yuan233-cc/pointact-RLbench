@@ -3,10 +3,10 @@ ulimit -u 2048
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
-export PYTHONPATH=$(pwd):$PYTHONPATH
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
-GPUS=1
-PER_DEVICE_BATCH_SIZE=128 #64
+GPUS=${GPUS:-1}
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-128} #64
 
 # Build accelerate arguments based on GPU count
 if [ $GPUS -eq 1 ]; then
@@ -21,8 +21,8 @@ else
 fi
 
 # datasets
-dataset=experiments/10_rlbench/data_configs/data-hybridvla-point-clf-frontview.yaml
-dataset_name=keysteps-euler-points.frontview-no.image-aug.30
+dataset=${DATASET_CONFIG:-experiments/10_rlbench/data_configs/data-hybridvla-point-clf-frontview.yaml}
+dataset_name=${DATASET_NAME:-keysteps-euler-points.frontview-no.image-aug.30}
 
 # hparams
 lr=5e-5
@@ -30,12 +30,13 @@ mlr=5e-5
 vlr=2e-5
 
 chunk_size=1
-epoch=1000 #3000
+epoch=${EPOCHS:-1000} #3000
 
 model_name_or_path=
-run_name=${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}
+run_name=${RUN_NAME:-${dataset_name}_ck${chunk_size}_lr${lr}_gpu${GPUS}_bs${PER_DEVICE_BATCH_SIZE}_epoch${epoch}}
 
-output_dir=$SCRATCH/datasets/PointAct_exprs/rlbench/hybridvla_10tasks/pointact/VLAEncDec3DWithActionClassificationModel-concerto-${run_name}-freeze.vlm
+output_dir=${OUTPUT_DIR:-$SCRATCH/datasets/PointAct_exprs/rlbench/hybridvla_10tasks/pointact/VLAEncDec3DWithActionClassificationModel-concerto-${run_name}-freeze.vlm}
+ptv3_init_ckpt_file=${PTV3_INIT_CKPT_FILE:-$SCRATCH/datasets/pretrained/Pointcept-Concerto/concerto_large.pth}
 # output_base=null # with time in directory name
 
 # Determine TF32 support
@@ -52,10 +53,10 @@ echo "TF32_SUPPORT: $TF32_SUPPORT"
 
 accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
-    --output_dir ${output_dir} \
+    --output_dir "${output_dir}" \
     ${model_name_or_path:+--model-name-or-path $model_name_or_path} \
     --vlm-name-or-path Qwen/Qwen2.5-VL-3B-Instruct \
-    --data-path ${dataset} \
+    --data-path "${dataset}" \
     --chunk-size ${chunk_size} \
     --dataloader-num-workers 8 \
     --freeze-vision-tower True \
@@ -77,10 +78,10 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --logging-steps 10 \
     --save-steps 2000 \
     --save-total-limit 10 \
-    --run-name ${run_name} \
+    --run-name "${run_name}" \
     --attn-implementation flash_attention_2 \
     --log_level info \
-    --report-to tensorboard \
+    --report-to "${REPORT_TO:-tensorboard}" \
     --color_aug True \
     --max_grad_norm 3 \
     --use_robot_state True \
@@ -95,7 +96,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --ptv3_clf_head_pos_bins 100 \
     --action_head_pos_center moe \
     --ptv3_apply_point_ca False \
-    --ptv3_init_ckpt_file $SCRATCH/datasets/pretrained/Pointcept-Concerto/concerto_large.pth
+    --ptv3_init_ckpt_file "${ptv3_init_ckpt_file}"
 
     # VLAEncDec3DClassificationModel
     # VLAEncDec3DWithActionClassificationModel
