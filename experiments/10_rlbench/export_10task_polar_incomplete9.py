@@ -20,11 +20,13 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from collect_10task_polar_episodes import MATERIALS, RLBENCH, TASKS
 from create_phone_polar_incomplete_episode import (
-    sample_projected_modalities,
-    source_points,
+    sample_projected_modalities, source_points,
 )
 from create_rlbench_10task_realistic_failure_dataset import apply_corruption
-from create_stack_wine_10episode_failure_dataset import project_world
+from create_stack_wine_10episode_failure_dataset import (
+    CAMERA_CENTER, CAMERA_EXTRINSICS, CAMERA_FOCAL, project_world,
+)
+from polar_depth_fill import add_polar_depth_filled_points, corruption_hole_pixels
 
 
 msgpack_numpy.patch()
@@ -51,8 +53,9 @@ FEATURES = {
 
 def dense_polar_bytes(frame: np.lib.npyio.NpzFile) -> bytes:
     angle = np.asarray(frame["AoLP"], dtype=np.float32)
-    valid = np.asarray(frame["valid_mask"], dtype=bool) & np.asarray(
-        frame["AoLP_valid_mask"], dtype=bool)
+    # Older render exports narrowed valid_mask while selecting point samples.
+    # The AoLP mask still covers polarized pixels without retained depth.
+    valid = np.asarray(frame["AoLP_valid_mask"], dtype=bool) & np.isfinite(angle)
     buffer = io.BytesIO()
     np.savez_compressed(
         buffer,
@@ -65,7 +68,9 @@ def dense_polar_bytes(frame: np.lib.npyio.NpzFile) -> bytes:
 
 
 def make_clouds(frame_path: Path, task_index: int, episode_index: int,
-                seed: int, voxel_size: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
+                seed: int, voxel_size: float) -> tuple[
+                    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict
+                ]:
     clean, source_pixels = source_points(frame_path, voxel_size)
     uv, depth = project_world(clean[:, :3])
     with np.load(frame_path) as frame:
@@ -97,7 +102,7 @@ def make_clouds(frame_path: Path, task_index: int, episode_index: int,
         final_output_points=len(incomplete),
         changed_projected_pixel=int(np.count_nonzero(final_pixels != original_pixels)),
     )
-    return clean, incomplete, final_pixels, original_pixels, stats
+    return clean, incomplete, source_pixels.astype(np.int32), final_pixels, original_pixels, stats
 
 
 def depth_alignment_report(expected: list[tuple[str, int, Path]]) -> dict:
@@ -131,7 +136,7 @@ def depth_alignment_report(expected: list[tuple[str, int, Path]]) -> dict:
 def build_episode(dataset: LeRobotDataset, raw_episode: Path, task: str,
                   global_episode: int, task_index: int, seed: int,
                   voxel_size: float, transactions: dict[str, lmdb.Transaction],
-                  records_stream) -> int:
+                  records_stream, fill_depth_holes: bool = False) -> int:
     summary = json.loads((raw_episode / "summary.json").read_text())
     render = json.loads((raw_episode / "frames_spp512/render_summary.json").read_text())
     if summary.get("complete") is not True or summary.get("task") != task:
@@ -147,14 +152,31 @@ def build_episode(dataset: LeRobotDataset, raw_episode: Path, task: str,
     task_text = "<br>".join(summary["descriptions"])
     staged = []
     for frame_index, frame_path in enumerate(files):
-        clean, incomplete, pixels, source_pixels, stats = make_clouds(
+        clean, incomplete, clean_pixels, pixels, source_pixels, stats = make_clouds(
             frame_path, task_index, global_episode, seed, voxel_size)
         with np.load(frame_path) as frame:
             rgb = np.asarray(frame["rgb"], dtype=np.uint8)
             dense = dense_polar_bytes(frame)
+            if fill_depth_holes:
+                hole_pixels = corruption_hole_pixels(clean_pixels, source_pixels)
+                filled, filled_pixels, filled_mask = add_polar_depth_filled_points(
+                    incomplete, pixels, frame,
+                    CAMERA_EXTRINSICS, CAMERA_FOCAL, CAMERA_CENTER,
+                    hole_pixel_indices=hole_pixels,
+                )
+                filled_source_pixels = np.concatenate((
+                    source_pixels,
+                    np.full(int(filled_mask.sum()), -1, dtype=np.int32),
+                ))
+                stats["depth_fill_target_pixels"] = len(hole_pixels)
+                stats["depth_filled_points"] = int(filled_mask.sum())
+                stats["filled_output_points"] = len(filled)
+            else:
+                filled = filled_pixels = filled_mask = filled_source_pixels = None
         if rgb.shape != (256, 256, 3):
             raise ValueError(f"Unexpected RGB size in {frame_path}: {rgb.shape}")
-        staged.append((rgb, clean, incomplete, pixels, source_pixels, dense, stats))
+        staged.append((rgb, clean, incomplete, pixels, source_pixels, dense, stats,
+                       filled, filled_pixels, filled_source_pixels, filled_mask))
 
     for frame_index, (rgb, *_rest) in enumerate(staged):
         dataset.add_frame({
@@ -164,13 +186,19 @@ def build_episode(dataset: LeRobotDataset, raw_episode: Path, task: str,
         }, task=task_text)
     dataset.save_episode()
 
-    for frame_index, (_rgb, clean, incomplete, pixels, source_pixels, dense, stats) in enumerate(staged):
+    for frame_index, (_rgb, clean, incomplete, pixels, source_pixels, dense, stats,
+                      filled, filled_pixels, filled_source_pixels, filled_mask) in enumerate(staged):
         key = f"{global_episode}-{frame_index}".encode("ascii")
         transactions["clean"].put(key, msgpack.packb(clean))
         transactions["incomplete"].put(key, msgpack.packb(incomplete))
         transactions["pixel"].put(key, msgpack.packb(pixels))
         transactions["source_pixel"].put(key, msgpack.packb(source_pixels))
         transactions["dense"].put(key, dense)
+        if fill_depth_holes:
+            transactions["filled"].put(key, msgpack.packb(filled))
+            transactions["filled_pixel"].put(key, msgpack.packb(filled_pixels))
+            transactions["filled_source_pixel"].put(key, msgpack.packb(filled_source_pixels))
+            transactions["filled_mask"].put(key, msgpack.packb(filled_mask))
         records_stream.write(json.dumps({
             "episode_index": global_episode, "frame_index": frame_index,
             "task": task, "seed": summary["seed"], "stats": stats,
@@ -187,6 +215,8 @@ def main() -> None:
     parser.add_argument("--episodes-per-task", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20260921)
     parser.add_argument("--voxel-size", type=float, default=0.012)
+    parser.add_argument("--fill-depth-holes", action="store_true",
+                        help="also export a HouseCat-style depth-filled polar point cloud")
     args = parser.parse_args()
     if args.episodes_per_task < 1 or args.voxel_size <= 0:
         parser.error("episode count and voxel size must be positive")
@@ -209,15 +239,23 @@ def main() -> None:
         repo_id=args.output.name, root=staging, fps=20, robot_type="franka",
         features=FEATURES, image_writer_processes=0, image_writer_threads=4,
     )
+    lmdb_paths = {
+        "clean": "points_frontview_polar_clean9",
+        "incomplete": "points_frontview_polar_incomplete9",
+        "pixel": "point_pixel_indices",
+        "source_pixel": "point_source_pixel_indices",
+        "dense": "polar_frontview_dense",
+    }
+    if args.fill_depth_holes:
+        lmdb_paths.update({
+            "filled": "points_frontview_polar_filled9",
+            "filled_pixel": "point_pixel_indices_filled",
+            "filled_source_pixel": "point_source_pixel_indices_filled",
+            "filled_mask": "point_depth_filled_mask",
+        })
     envs = {
-        name: lmdb.open(str(staging / path), map_size=8 * 1024**3)
-        for name, path in {
-            "clean": "points_frontview_polar_clean9",
-            "incomplete": "points_frontview_polar_incomplete9",
-            "pixel": "point_pixel_indices",
-            "source_pixel": "point_source_pixel_indices",
-            "dense": "polar_frontview_dense",
-        }.items()
+        name: lmdb.open(str(staging / path), map_size=(64 if name == "filled" else 8) * 1024**3)
+        for name, path in lmdb_paths.items()
     }
     total_frames = 0
     try:
@@ -227,7 +265,8 @@ def main() -> None:
                 try:
                     frames = build_episode(
                         dataset, raw_episode, task, global_episode, TASKS.index(task),
-                        args.seed, args.voxel_size, transactions, stream)
+                        args.seed, args.voxel_size, transactions, stream,
+                        fill_depth_holes=args.fill_depth_holes)
                     for txn in transactions.values():
                         txn.commit()
                 except Exception:
@@ -258,6 +297,13 @@ def main() -> None:
         "polar_dense_contents": ["DoLP", "cos2AoLP", "sin2AoLP", "valid_mask"],
         "source_raw_dirname": args.raw.name, "voxel_size_m": args.voxel_size,
         "corruption_seed": args.seed,
+        "filled_point_cloud_dirname": "points_frontview_polar_filled9" if args.fill_depth_holes else None,
+        "depth_fill": ({"method": "multiscale_morphology_on_incomplete_projected_depth",
+                        "point_selection": "lost_pre_corruption_voxel_pixels_with_estimated_depth",
+                        "unavailable_polar_components": "zero",
+                        "mask_dirname": "point_depth_filled_mask",
+                        "source_pixel_index_for_filled_points": -1}
+                       if args.fill_depth_holes else None),
         "material_profiles_sha256": hashlib.sha256(MATERIALS.read_bytes()).hexdigest(),
     }
     (staging / "meta/polar_incomplete_features.json").write_text(
@@ -283,7 +329,17 @@ def main() -> None:
         "compressed NPZ maps (`DoLP`, `cos2AoLP`, `sin2AoLP`, `valid_mask`) for "
         "every selected keyframe, independent of point-cloud corruption. Polar maps "
         "cover camera-visible valid pixels, not occluded surfaces.\n\n"
-        "The RGB video, state, and action are stored in LeRobot v2.1 format. "
+        + ("With `--fill-depth-holes`, `points_frontview_polar_filled9` adds "
+           "points from multiscale depth filling of the incomplete cloud. "
+           "Only pre-corruption voxel samples lost to corruption are fill "
+           "candidates; the offline target mask uses the clean source cloud "
+           "and is not available at live inference. RGB and polar are sampled "
+           "at that pixel, with unavailable polar components set to zero. "
+           "`point_depth_filled_mask` "
+           "marks synthetic rows; `point_source_pixel_indices_filled` is -1 there. "
+           "Training on this LMDB requires the filled-cloud normalization file.\n\n"
+           if args.fill_depth_holes else "")
+        + "The RGB video, state, and action are stored in LeRobot v2.1 format. "
         "`point_pixel_indices` and `point_source_pixel_indices` record current "
         "and original pixel provenance for each incomplete point. "
         "`frame_corruption_stats.jsonl` records per-frame failure statistics. "
@@ -305,6 +361,17 @@ def main() -> None:
         "--rotation_type", "quat", "--target_rotation_type", "euler",
         "--replace_zero_std",
     ], cwd=REPO_ROOT, check=True)
+    if args.fill_depth_holes:
+        filled_norm = staging / "robot_state_action_stats/euler_points_frontview_filled_clf.json"
+        subprocess.run([
+            sys.executable, str(REPO_ROOT / "data_prep/prepare_robot_state_action_stats.py"),
+            "--dataset_dirs", str(staging), "--output_file", str(filled_norm),
+            "--point_cloud_dir", "points_frontview_polar_filled9",
+            "--state_xyz_slice", "0", "3", "--action_xyz_slice", "0", "3",
+            "--state_rotation_slice", "3", "7", "--action_rotation_slice", "3", "7",
+            "--rotation_type", "quat", "--target_rotation_type", "euler",
+            "--replace_zero_std",
+        ], cwd=REPO_ROOT, check=True)
     staging.rename(args.output)
     print(json.dumps({"output": str(args.output), "episodes": len(expected),
                       "frames": total_frames}, indent=2))

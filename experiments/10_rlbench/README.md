@@ -96,6 +96,31 @@ exercise one training epoch with `--ptv3_input_channels 9`. Set
 input channels and zero-initialize the three new polar weights. One episode is a
 training smoke test, not a useful final policy dataset.
 
+To compare HouseCat-style depth filling on that episode, export a separate
+dataset and select its filled-point configuration:
+
+```bash
+python experiments/10_rlbench/create_phone_polar_incomplete_episode.py \
+  --fill-depth-holes \
+  --output robot_data/rlbench/lerobot_point_lmdb/phone_on_base_1episode_polar_housecat_filled9_seed24_v3
+DATA_PATH=experiments/10_rlbench/data_configs/data-phone-polar-filled9-one-episode.yaml \
+  bash experiments/10_rlbench/train_phone_polar_incomplete9_one_episode.sh
+```
+
+`points_frontview_polar_filled9` retains the original incomplete points. It
+projects them into a sparse depth image and estimates missing depths by
+HouseCat-style multiscale morphology. Only pixels corresponding to voxel
+samples actually lost to corruption are back-projected; ordinary empty pixels
+from voxel downsampling are not filled. RGB and polar come from that pixel;
+unavailable polar components are zero. The offline target-pixel mask is derived
+from the pre-corruption source cloud, so this preprocessing is not a deployable
+completion method without an inference-time way to locate missing pixels. The
+renderer’s `depth_m` is not used as a completion target.
+`point_depth_filled_mask` identifies generated rows for analysis but is not a
+model input. The exporter computes separate state/action statistics for the
+filled cloud. The filled XYZ are local estimates and can be wrong at object
+boundaries.
+
 To build a fresh, aligned ten-task dataset (100 successful demonstrations per
 task), run `python experiments/10_rlbench/collect_10task_polar_episodes.py` on a
 machine with the local custom RLBench renderer and CoppeliaSim installation.
@@ -109,6 +134,19 @@ and original/current pixel indices. See the generated dataset README for the
 exact channel and action semantics. The training configuration is
 `data_configs/data-10task-polar-incomplete9.yaml`; run
 `bash experiments/10_rlbench/train_10task_polar_incomplete9.sh` after export.
+For the ten-task filled variant, append the corrected filled-point LMDB to the
+existing dataset, leaving the clean and incomplete clouds untouched:
+
+```bash
+python experiments/10_rlbench/append_10task_polar_filled9.py
+bash experiments/10_rlbench/train_10task_polar_filled9.sh
+```
+
+The filled-point configuration reads the same LeRobot episodes and actions,
+selects `points_frontview_polar_filled9`, and uses its own normalization file.
+It keeps the nine-channel XYZRGB+polar PointACT path; material conditioning is
+disabled. The offline fill uses clean-source pixel provenance to locate holes,
+which is not available during live inference.
 These are newly generated trajectories, so episode numbers do not match the
 original RGB-only dataset. Optical material parameters are assumptions stored
 with the export, and the full polar maps cover valid camera-visible pixels.
