@@ -359,7 +359,7 @@ def main() -> None:
         "--state_xyz_slice", "0", "3", "--action_xyz_slice", "0", "3",
         "--state_rotation_slice", "3", "7", "--action_rotation_slice", "3", "7",
         "--rotation_type", "quat", "--target_rotation_type", "euler",
-        "--replace_zero_std",
+        "--replace_zero_std", "--classification_action_raw",
     ], cwd=REPO_ROOT, check=True)
     if args.fill_depth_holes:
         filled_norm = staging / "robot_state_action_stats/euler_points_frontview_filled_clf.json"
@@ -370,7 +370,7 @@ def main() -> None:
             "--state_xyz_slice", "0", "3", "--action_xyz_slice", "0", "3",
             "--state_rotation_slice", "3", "7", "--action_rotation_slice", "3", "7",
             "--rotation_type", "quat", "--target_rotation_type", "euler",
-            "--replace_zero_std",
+            "--replace_zero_std", "--classification_action_raw",
         ], cwd=REPO_ROOT, check=True)
     staging.rename(args.output)
     print(json.dumps({"output": str(args.output), "episodes": len(expected),

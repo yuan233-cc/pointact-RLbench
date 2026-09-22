@@ -285,7 +285,7 @@ def main() -> None:
                 "--state_xyz_slice", "0", "3", "--action_xyz_slice", "0", "3",
                 "--state_rotation_slice", "3", "7", "--action_rotation_slice", "3", "7",
                 "--rotation_type", "quat", "--target_rotation_type", "euler",
-                "--replace_zero_std",
+                "--replace_zero_std", "--classification_action_raw",
             ], cwd=REPO_ROOT, check=True)
         staging.rename(args.output)
     except Exception:

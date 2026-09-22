@@ -421,6 +421,7 @@ def main(
     euler_order_dst: str = "xyz",
     include_quantiles: bool = True,
     replace_zero_std: bool = False,
+    classification_action_raw: bool = False,
 ):
     """Compute global robot state/action stats over raw parquet columns.
 
@@ -449,6 +450,9 @@ def main(
             This keeps the selected vectors in memory.
         replace_zero_std: Replace zero std entries with 1 in the output. Useful if the
             file will also be used as a mean/std normalization file.
+        classification_action_raw: Keep absolute 7D XYZ/Euler/gripper action targets
+            unnormalized for the PointACT classification head, while retaining
+            the computed action min/max/quantiles and state normalization.
     """
 
     _validate_point_cloud_args(
@@ -558,6 +562,13 @@ def main(
     if not normalize_rotation:
         _disable_rotation_mean_std(state_stats, state_target_rotation_slice)
         _disable_rotation_mean_std(action_stats, action_target_rotation_slice)
+    if classification_action_raw:
+        if target_rotation_type != "euler" or len(action_stats["mean"]) != 7:
+            raise ValueError("Classification action statistics require 7D Euler actions")
+        if action_stats["min"][6] < -1e-5 or action_stats["max"][6] > 1 + 1e-5:
+            raise ValueError("Classification gripper targets must be in [0, 1]")
+        action_stats["mean"] = [0.0] * 7
+        action_stats["std"] = [1.0] * 7
 
     _print_stats("robot state", state_stats, include_quantiles)
     _print_stats("robot action", action_stats, include_quantiles)
@@ -716,6 +727,12 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Replace zero std entries with 1 in the output.",
     )
+    parser.add_argument(
+        "--classification_action_raw",
+        "--classification-action-raw",
+        action="store_true",
+        help="Keep 7D Euler classifier actions unnormalized (identity action mean/std).",
+    )
     return parser.parse_args()
 
 
@@ -740,4 +757,5 @@ if __name__ == "__main__":
         euler_order_dst=args.euler_order_dst,
         include_quantiles=args.include_quantiles,
         replace_zero_std=args.replace_zero_std,
+        classification_action_raw=args.classification_action_raw,
     )

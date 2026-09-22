@@ -29,6 +29,12 @@ if [[ ! -f "$ptv3_init_ckpt_file" ]]; then
     exit 2
 fi
 
+# Classification targets must be raw XYZ/Euler/gripper values. The published
+# polar archive has action mean/std from regression preprocessing, so create a
+# run-local corrected copy instead of mutating the mounted dataset.
+data_path="$(python experiments/10_rlbench/prepare_classifier_data_config.py \
+    "$data_path" "$output_dir/classifier_input_config")"
+
 accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
     --output_dir "$output_dir" \
