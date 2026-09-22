@@ -544,7 +544,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                 p.requires_grad = False
         self.apply(self._init_weights)
 
-    def forward(self, data_dict):
+    def forward(self, data_dict, return_encoder=False):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -554,11 +554,15 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         """
         point = Point(data_dict)
         point = self.embedding(point)
+        if "point_condition" in data_dict:
+            point.feat = point.feat + data_dict["point_condition"].to(point.feat.dtype)
 
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
         point = self.enc(point)
+        if return_encoder:
+            return point
         if not self.enc_mode:
             point = self.dec(point)
         return point

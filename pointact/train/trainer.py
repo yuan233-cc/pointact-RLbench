@@ -48,6 +48,8 @@ class VLATrainer(Trainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if getattr(self.model.config, "use_target_reconstruction", False):
+            self.meta_losses = self.meta_losses + ("target_reconstruction_loss",)
         self.add_callback(MetaLossesTrainerState(list(self.meta_losses)))
 
     def _has_special_lrs(self):

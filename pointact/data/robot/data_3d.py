@@ -1,5 +1,6 @@
 import os
 import random
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from pointact.constants import OBS_POINTS
 
 from pointact.data.robot.base import LeRobotDatasetMixin
 from pointact.data.robot.registry import register_robot_dataset
+from pointact.data.polar_material import dense_polar_from_bytes, dense_polar_from_npz, load_material_candidates
 from pointact.data.transforms.pointcloud import (
     augment_point_cloud_color,
     random_rotate_point_around_z,
@@ -62,6 +64,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         augment_pc_rot: int = 0,
         point_cloud_dirname: str | None = None,
         point_feature_mode: str = "xyzrgb",
+        polar_dense_dirname: str | None = None,
+        polar_dense_frames_dir: str | None = None,
+        point_pixel_dirname: str | None = None,
+        material_profiles_file: str | None = None,
+        material_candidate_names: list[str] | None = None,
+        target_reconstruction_dirname: str | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -94,6 +102,27 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if point_feature_mode not in ("xyzrgb", "xyzrgb_polar"):
             raise ValueError(f"Unsupported point_feature_mode={point_feature_mode!r}")
         self.point_feature_mode = point_feature_mode
+        enabled = any((polar_dense_dirname, polar_dense_frames_dir, point_pixel_dirname, material_profiles_file))
+        if enabled and not (point_pixel_dirname and material_profiles_file and
+                            bool(polar_dense_dirname) != bool(polar_dense_frames_dir)):
+            raise ValueError("Material conditioning requires point pixels, material profiles, and one dense polar source")
+        self.use_polar_material_conditioning = enabled
+        self.polar_dense_dir = self._resolve_sidecar_path(polar_dense_dirname) if polar_dense_dirname else None
+        self.polar_dense_frames_dir = self._resolve_sidecar_path(polar_dense_frames_dir) if polar_dense_frames_dir else None
+        self.point_pixel_dir = self._resolve_sidecar_path(point_pixel_dirname) if point_pixel_dirname else None
+        self.material_candidates = (torch.from_numpy(load_material_candidates(
+            self._resolve_sidecar_path(material_profiles_file), material_candidate_names
+        )) if enabled else None)
+        self.target_reconstruction_dir = (
+            self._resolve_sidecar_path(target_reconstruction_dirname)
+            if target_reconstruction_dirname else None
+        )
+        if self.target_reconstruction_dir is not None:
+            manifest_path = self.target_reconstruction_dir / "manifest.json"
+            if manifest_path.exists() and not json.loads(manifest_path.read_text())["complete"]:
+                raise ValueError(f"Target reconstruction sidecar is incomplete: {manifest_path}")
+        self._sidecar_envs = {}
+        self._sidecar_pid = None
 
         assert point_cloud_dirname is not None
         self.point_cloud_dir = os.path.join(self.root, point_cloud_dirname)
@@ -102,6 +131,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self._point_cloud_lmdb_pid = None    
 
     def __del__(self):
+        for env in getattr(self, "_sidecar_envs", {}).values():
+            env.close()
         if getattr(self, "_point_cloud_lmdb_txn", None) is not None:
             self._point_cloud_lmdb_txn.abort()
             self._point_cloud_lmdb_txn = None
@@ -115,7 +146,61 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         state["_point_cloud_lmdb_env"] = None
         state["_point_cloud_lmdb_txn"] = None
         state["_point_cloud_lmdb_pid"] = None
+        state["_sidecar_envs"] = {}
+        state["_sidecar_pid"] = None
         return state
+
+    def _resolve_sidecar_path(self, path):
+        if path is None:
+            return None
+        candidate = Path(path)
+        if candidate.is_absolute() or candidate.exists():
+            return candidate
+        return Path(self.root) / candidate
+
+    def _read_sidecar(self, path: Path, ep_idx: int, frame_idx: int):
+        if not path.is_dir():
+            raise FileNotFoundError(path)
+        file = path / f"{frame_idx:06d}.npy"
+        if file.exists():
+            return np.load(file)
+        file = path / f"{frame_idx:06d}.npz"
+        if file.exists():
+            return file
+        if self._sidecar_pid != os.getpid():
+            self._sidecar_envs = {}
+            self._sidecar_pid = os.getpid()
+        key = str(path)
+        if key not in self._sidecar_envs:
+            self._sidecar_envs[key] = lmdb.open(key, readonly=True, lock=False, readahead=False)
+        with self._sidecar_envs[key].begin(buffers=True) as txn:
+            value = txn.get(f"{ep_idx}-{frame_idx}".encode("ascii"))
+            if value is None:
+                raise KeyError(f"Missing sidecar {ep_idx}-{frame_idx} in {path}")
+            return bytes(value)
+
+    def _load_point_pixels(self, ep_idx, frame_idx):
+        value = self._read_sidecar(self.point_pixel_dir, ep_idx, frame_idx)
+        return np.asarray(msgpack.unpackb(value) if isinstance(value, bytes) else value, dtype=np.int32)
+
+    def _load_target_reconstruction(self, ep_idx, frame_idx, input_point_count):
+        value = self._read_sidecar(self.target_reconstruction_dir, ep_idx, frame_idx)
+        record = msgpack.unpackb(value) if isinstance(value, bytes) else value
+        points = np.asarray(record["points"], dtype=np.float32).reshape(-1, 3).copy()
+        point_mask = np.asarray(record["input_mask"], dtype=np.float32).reshape(-1)
+        if (len(point_mask) != input_point_count or not np.isfinite(points).all()
+                or not np.isin(point_mask, [0, 1]).all()):
+            raise ValueError(f"Invalid target labels for {ep_idx}-{frame_idx}")
+        return points, point_mask
+
+    def _load_dense_polar(self, ep_idx, frame_idx):
+        path = self.polar_dense_dir or self.polar_dense_frames_dir
+        value = self._read_sidecar(path, ep_idx, frame_idx)
+        if isinstance(value, np.ndarray):
+            if value.ndim != 3 or value.shape[0] != 4:
+                raise ValueError(f"Dense polar array must be [4,H,W], got {value.shape}")
+            return value.astype(np.float32)
+        return dense_polar_from_bytes(value) if isinstance(value, bytes) else dense_polar_from_npz(value)
 
     def set_feature_keys(
         self, video_keys=None, state_keys=None, action_keys=None,
@@ -154,12 +239,46 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         item, query_indices = self.query_action_chunk(item, idx, ep_idx, delta_indices)
         item = self.add_video_frames(item, ep_idx, query_indices)
+        if self.use_polar_material_conditioning:
+            rgb_key = self.select_video_keys[0]
+            if rgb_key not in item:
+                item.update(self._query_videos({rgb_key: [item["timestamp"].item()]}, ep_idx))
+            rgb = item[rgb_key]
+            if rgb.ndim == 4:
+                rgb = rgb[0]
+            rgb = torch.as_tensor(rgb).float()
+            if rgb.ndim == 3 and rgb.shape[-1] == 3:
+                rgb = rgb.permute(2, 0, 1)
+            if rgb.max() > 1:
+                rgb = rgb / 255.0
+            item["material_rgb"] = rgb.contiguous()
+            item["polar_dense"] = torch.from_numpy(self._load_dense_polar(ep_idx, frame_idx))
+            if item["material_rgb"].shape != (3, *item["polar_dense"].shape[-2:]):
+                raise ValueError("Dense RGB/polar image sizes differ; pixel coordinates would be misaligned")
+            item["material_candidates"] = self.material_candidates
         self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
+        if self.target_reconstruction_dir is not None:
+            target_points, target_mask = self._load_target_reconstruction(
+                ep_idx, frame_idx, len(point_cloud)
+            )
+            item["target_points"] = torch.from_numpy(target_points)
+            point_cloud = np.column_stack((point_cloud, target_mask)).astype(np.float32)
+        if self.use_polar_material_conditioning:
+            point_pixels = self._load_point_pixels(ep_idx, frame_idx).reshape(-1)
+            if len(point_pixels) != len(point_cloud):
+                raise ValueError("Point pixels and point cloud have different row counts")
+            point_cloud = np.column_stack((point_cloud, point_pixels)).astype(np.float32)
         point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
         point_cloud = self.augment_point_cloud(point_cloud, item)
         point_cloud = self.center_point_cloud(point_cloud, item)
+        if self.use_polar_material_conditioning:
+            item["point_pixel_indices"] = torch.from_numpy(point_cloud[:, -1].astype(np.int64))
+            point_cloud = np.ascontiguousarray(point_cloud[:, :-1])
+        if self.target_reconstruction_dir is not None:
+            item["target_input_mask"] = torch.from_numpy(point_cloud[:, -1].copy())
+            point_cloud = np.ascontiguousarray(point_cloud[:, :-1])
         item[OBS_POINTS] = torch.from_numpy(point_cloud)
 
         self.convert_eef_rotation(item)
@@ -241,6 +360,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if self.augment_pc_rot != 0:
             angle = np.random.uniform(-1, 1) * np.deg2rad(self.augment_pc_rot)
             point_cloud[:, :3] = random_rotate_point_around_z(point_cloud[:, :3], angle=angle)
+            if "target_points" in item:
+                item["target_points"] = random_rotate_point_around_z(
+                    item["target_points"], angle=angle
+                )
             if self.is_action_eef:
                 item[OBS_STATE][:3] = random_rotate_point_around_z(
                     item[OBS_STATE][:3].unsqueeze(0), angle=angle
@@ -263,9 +386,15 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             if not self.is_delta_action:
                 item[ACTION][:, :3] = item[ACTION][:, :3] - point_center[None, :]
         item[f"{OBS_POINTS}.center"] = point_center
+        if "target_points" in item:
+            item["target_points"] = item["target_points"] - point_center
         return point_cloud
 
     def post_process(self, item: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         ordered_keys = self.select_feature_keys + [OBS_POINTS, "task", f"{OBS_POINTS}.center"] + self.select_action_is_pad_keys
+        if self.use_polar_material_conditioning:
+            ordered_keys += ["material_rgb", "polar_dense", "material_candidates", "point_pixel_indices"]
+        if self.target_reconstruction_dir is not None:
+            ordered_keys += ["target_points", "target_input_mask"]
         item = {key: item[key] for key in ordered_keys if key in item}
         return item

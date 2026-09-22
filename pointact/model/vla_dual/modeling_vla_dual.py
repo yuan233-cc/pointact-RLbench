@@ -21,6 +21,7 @@ class VLADualOutputWithPast(ModelOutput):
     loss: torch.FloatTensor | None = None
     action_loss: torch.FloatTensor | None = None
     text_loss: torch.FloatTensor | None = None
+    target_reconstruction_loss: torch.FloatTensor | None = None
 
     actions: torch.FloatTensor | None = None
     logits: torch.FloatTensor | None = None

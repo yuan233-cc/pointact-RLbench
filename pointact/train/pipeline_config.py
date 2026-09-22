@@ -55,6 +55,11 @@ class TrainPipelineConfig(TrainingArguments):
     ptv3_apply_point_ca: bool = field(default=True)
     ptv3_input_channels: int = field(default=6)
     ptv3_backend: str = field(default="concerto")
+    use_polar_material_conditioning: bool = field(default=False)
+    use_target_reconstruction: bool = field(default=False)
+    target_reconstruction_weight: float = field(default=0.1)
+    target_mask_loss_weight: float = field(default=0.1)
+    target_reconstruction_max_points: int = field(default=256)
     # initialize the point cloud transformer v3
     ptv3_init_ckpt_file: str = field(default=None)
 

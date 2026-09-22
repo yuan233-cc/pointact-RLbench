@@ -59,12 +59,36 @@ def build_fresh_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, c
 
 
 def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute_dtype: torch.dtype):
+    if (training_args.use_polar_material_conditioning and
+            not recipe.model_class.rsplit(".", 1)[-1].startswith("VLAEncDec3DWithAction")):
+        raise ValueError("Polar material conditioning supports the PointAct with-action models")
+    if (training_args.use_target_reconstruction and
+            recipe.model_class.rsplit(".", 1)[-1] != "VLAEncDec3DWithActionClassificationModel"):
+        raise ValueError("Target reconstruction supports the PointACT with-action classifier")
     if training_args.model_name_or_path is None:
         return build_fresh_model(recipe, training_args, compute_dtype)
 
     model_class = _import_object(recipe.model_class)
+    config = None
+    if training_args.use_polar_material_conditioning or training_args.use_target_reconstruction:
+        config_class = _import_object(recipe.config_class)
+        overrides = {}
+        if training_args.use_polar_material_conditioning:
+            overrides["use_polar_material_conditioning"] = True
+        if training_args.use_target_reconstruction:
+            overrides.update(
+                use_target_reconstruction=True,
+                target_reconstruction_weight=training_args.target_reconstruction_weight,
+                target_mask_loss_weight=training_args.target_mask_loss_weight,
+                target_reconstruction_max_points=training_args.target_reconstruction_max_points,
+            )
+        config = config_class.from_pretrained(
+            training_args.model_name_or_path,
+            **overrides,
+        )
     model = model_class.from_pretrained(
         training_args.model_name_or_path,
+        **({"config": config} if config is not None else {}),
         dtype=compute_dtype,
         attn_implementation=training_args.attn_implementation,
     )

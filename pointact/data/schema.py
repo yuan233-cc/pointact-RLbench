@@ -54,6 +54,12 @@ class LerobotConfig:
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
     point_cloud_dirname: str | None = None
     point_feature_mode: str = "xyzrgb"  # xyzrgb, xyzrgb_polar (DoLP, cos2AoLP, sin2AoLP)
+    polar_dense_dirname: str | None = None
+    polar_dense_frames_dir: str | None = None
+    point_pixel_dirname: str | None = None
+    material_profiles_file: str | None = None
+    material_candidate_names: list[str] | None = None
+    target_reconstruction_dirname: str | None = None
 
     image_size: int | None = None
 

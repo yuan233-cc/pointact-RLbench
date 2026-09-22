@@ -103,5 +103,36 @@ class DataCollator(DefaultDataCollator):
         if len(batch_points) > 0:
             data_dict["points"] = torch.cat(batch_points, dim=0)
             data_dict["npoints_in_batch"] = torch.LongTensor(npoints_in_batch)
+        if "target_points" in examples[0]:
+            if any("target_points" not in example or "target_input_mask" not in example for example in examples):
+                raise ValueError("Cannot mix samples with and without target reconstruction labels")
+            data_dict["target_points"] = pad_sequence(
+                [example["target_points"] for example in examples]
+            )
+            data_dict["target_counts"] = torch.LongTensor(
+                [len(example["target_points"]) for example in examples]
+            )
+            data_dict["target_input_mask"] = torch.cat(
+                [example["target_input_mask"] for example in examples]
+            )
+        if "material_rgb" in examples[0]:
+            if any("material_rgb" not in example for example in examples):
+                raise ValueError("Cannot mix material-conditioned and plain examples in one batch")
+            data_dict["material_rgb"] = torch.stack([example["material_rgb"] for example in examples])
+            data_dict["polar_dense"] = torch.stack([example["polar_dense"] for example in examples])
+            data_dict["point_pixel_indices"] = torch.cat(
+                [example["point_pixel_indices"] for example in examples])
+            candidate_counts = [len(example["material_candidates"]) for example in examples]
+            max_candidates = max(candidate_counts)
+            feature_size = examples[0]["material_candidates"].shape[-1]
+            candidates = examples[0]["material_candidates"].new_zeros(
+                len(examples), max_candidates, feature_size)
+            mask = torch.zeros(len(examples), max_candidates, dtype=torch.bool)
+            for index, example in enumerate(examples):
+                count = candidate_counts[index]
+                candidates[index, :count] = example["material_candidates"]
+                mask[index, :count] = True
+            data_dict["material_candidates"] = candidates
+            data_dict["material_candidate_mask"] = mask
 
         return data_dict

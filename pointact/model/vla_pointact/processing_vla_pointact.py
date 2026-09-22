@@ -82,7 +82,8 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         return robot_inputs
 
     @torch.no_grad
-    def _prepare_robot_inputs(self, batch: dict, points_workspace: dict=None, remove_arm: bool=False):
+    def _prepare_robot_inputs(self, batch: dict, points_workspace: dict=None, remove_arm: bool=False,
+                              point_indices_out: list | None = None):
         """Prepare model inputs from raw robot batch"""
         batch_messages = []
         batch_states = []
@@ -121,12 +122,26 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                 state = torch.as_tensor(np.concatenate(state_parts, axis=-1), dtype=torch.float32)
 
             workspace = self._resolve_points_workspace(repo_id, points_workspace)
-            point_cloud = self._prepare_point_cloud_for_sample(
-                mini_batch,
-                repo_id,
-                workspace,
-                remove_arm=remove_arm,
-            )
+            if point_indices_out is None:
+                point_cloud = self._prepare_point_cloud_for_sample(
+                    mini_batch, repo_id, workspace, remove_arm=remove_arm,
+                )
+            else:
+                if "observation.points" not in mini_batch or "point_pixel_indices" not in mini_batch:
+                    raise ValueError("Material conditioning needs precomputed observation.points and point_pixel_indices")
+                point_pixels = np.asarray(mini_batch["point_pixel_indices"], dtype=np.int32).reshape(-1)
+                cloud = self._as_numpy_point_cloud(mini_batch["observation.points"])
+                if len(cloud) != len(point_pixels):
+                    raise ValueError("Point cloud and point pixel indices have different lengths")
+                mini_batch = dict(mini_batch)
+                mini_batch["observation.points"] = np.column_stack((cloud, point_pixels))
+                conditioned_cloud = self._build_existing_point_cloud(mini_batch, workspace)
+                if remove_arm and "observation.robot_joints_bbox" in mini_batch:
+                    conditioned_cloud = self._remove_robot_arm_points(conditioned_cloud, mini_batch)
+                conditioned_cloud = self._subsample_point_cloud(
+                    conditioned_cloud, self.robot_config["max_npoints"][repo_id])
+                point_indices_out.append(torch.as_tensor(conditioned_cloud[:, -1].copy(), dtype=torch.long))
+                point_cloud = np.ascontiguousarray(conditioned_cloud[:, :-1])
             point_cloud = torch.from_numpy(point_cloud).float()
             point_cloud, state, point_center = self._center_point_cloud_and_state(
                 point_cloud,
@@ -177,8 +192,11 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         self, model, batch: dict, pred_rot_type: str, use_cot=False, 
         points_workspace: dict=None, remove_arm: bool=False, **kwargs
     ):
+        conditioned = bool(model.config.use_polar_material_conditioning)
+        point_indices = [] if conditioned else None
         batch_messages, batch_states, batch_points, batch_point_centers, repo_ids = self._prepare_robot_inputs(
-            batch, points_workspace=points_workspace, remove_arm=remove_arm
+            batch, points_workspace=points_workspace, remove_arm=remove_arm,
+            point_indices_out=point_indices,
         )
         device = model.device
 
@@ -196,6 +214,35 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         inputs["points"] = torch.cat(batch_points, 0).to(device)
         inputs["npoints_in_batch"] = torch.LongTensor([len(x) for x in batch_points]).to(device)
         inputs["attention_mask"] = inputs["attention_mask"].bool().to(device)
+        if conditioned:
+            rgb_images, dense_polar, candidates = [], [], []
+            for index, repo_id in enumerate(repo_ids):
+                key = self.robot_config["select_video_keys"][repo_id][0]
+                rgb = torch.as_tensor(batch[key][index]).float()
+                if rgb.ndim == 3 and rgb.shape[-1] == 3:
+                    rgb = rgb.permute(2, 0, 1)
+                if rgb.max() > 1:
+                    rgb = rgb / 255.0
+                rgb_images.append(rgb)
+                polar = torch.as_tensor(batch["polar_dense"][index]).float()
+                if polar.ndim == 3 and polar.shape[-1] == 4:
+                    polar = polar.permute(2, 0, 1)
+                dense_polar.append(polar)
+                supplied = batch.get("material_candidates")
+                candidate = (supplied[index] if supplied is not None else
+                             self.robot_config["material_candidates"][repo_id])
+                candidates.append(torch.as_tensor(candidate, dtype=torch.float32))
+            inputs["material_rgb"] = torch.stack(rgb_images).to(device)
+            inputs["polar_dense"] = torch.stack(dense_polar).to(device)
+            inputs["point_pixel_indices"] = torch.cat(point_indices).to(device)
+            max_count = max(len(candidate) for candidate in candidates)
+            material_values = torch.zeros(len(candidates), max_count, candidates[0].shape[-1])
+            material_mask = torch.zeros(len(candidates), max_count, dtype=torch.bool)
+            for index, candidate in enumerate(candidates):
+                material_values[index, :len(candidate)] = candidate
+                material_mask[index, :len(candidate)] = True
+            inputs["material_candidates"] = material_values.to(device)
+            inputs["material_candidate_mask"] = material_mask.to(device)
 
         actions, _ = model.sample_actions(
             **inputs, 

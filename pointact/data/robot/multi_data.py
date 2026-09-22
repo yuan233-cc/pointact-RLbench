@@ -197,6 +197,7 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             "state_action_norm": {},
             "points_workspace": {},
             "max_npoints": {},
+            "material_candidates": {},
         }
         for data_config in self.data_configs:
             repo_id = data_config.repo_id.replace("/", ".")
@@ -204,6 +205,15 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             robot_config["is_action_eef"][repo_id] = data_config.is_action_eef
             robot_config["points_workspace"][repo_id] = data_config.points_workspace
             robot_config["max_npoints"][repo_id] = data_config.max_npoints
+            if data_config.material_profiles_file is not None:
+                from pointact.data.polar_material import load_material_candidates
+
+                material_path = Path(data_config.material_profiles_file)
+                if not material_path.is_absolute() and not material_path.exists():
+                    material_path = Path(data_config.root or HF_LEROBOT_HOME) / data_config.repo_id / material_path
+                robot_config["material_candidates"][repo_id] = load_material_candidates(
+                    material_path, data_config.material_candidate_names
+                ).tolist()
             if data_config.state_action_norm_file is not None:
                 with open(data_config.state_action_norm_file) as f:
                     robot_config["state_action_norm"][repo_id] = json.load(f)

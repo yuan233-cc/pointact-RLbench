@@ -1,0 +1,50 @@
+{
+  "close_box": {
+    "manipulated": ["box_lid"],
+    "related": ["box_base"]
+  },
+  "close_laptop_lid": {
+    "manipulated": ["lid_visual"],
+    "related": ["base_visual"]
+  },
+  "toilet_seat_down": {
+    "manipulated": ["toilet_seat_up_seat"],
+    "related": ["toilet_seat_up_toilet", "toilet"]
+  },
+  "sweep_to_dustpan": {
+    "manipulated": ["sweep_to_dustpan_broom_visual"],
+    "related": {
+      "dustpan": ["Dustpan_3", "Dustpan_4", "Dustpan_5"],
+      "dirt": ["dirt0", "dirt1", "dirt2", "dirt3", "dirt4"]
+    }
+  },
+  "close_fridge": {
+    "manipulated": ["door_top_visual"],
+    "related": ["fridge_base_visual"]
+  },
+  "phone_on_base": {
+    "manipulated": ["phone_visual"],
+    "related": ["phone_case_visual"]
+  },
+  "take_umbrella_out_of_umbrella_stand": {
+    "manipulated": ["umbrella_visual"],
+    "related": ["stand_visual"]
+  },
+  "take_frame_off_hanger": {
+    "manipulated": ["frame_visual", "picture"],
+    "related": {
+      "hanger": ["hanger"]
+    }
+  },
+  "stack_wine": {
+    "manipulated": ["wine_bottle_visual"],
+    "related": ["rack_top_visual", "rack_bottom_visual"]
+  },
+  "water_plants": {
+    "manipulated": ["waterer_visual"],
+    "related": {
+      "plant": ["plant_visual"],
+      "pot": ["base_visual"]
+    }
+  }
+}

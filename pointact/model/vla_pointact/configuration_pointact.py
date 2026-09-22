@@ -41,6 +41,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         ptv3_apply_point_ca=False,
         ptv3_input_channels=6,
         ptv3_backend="concerto",
+        use_polar_material_conditioning=False,
+        use_target_reconstruction=False,
+        target_reconstruction_weight=0.1,
+        target_mask_loss_weight=0.1,
+        target_reconstruction_max_points=256,
         action_regression_loss="l2",
         action_head_pos_center="moe", 
         regression_head_heatmap_temp=0.1,
@@ -81,6 +86,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.ptv3_input_channels = ptv3_input_channels
         self.ptv3_apply_point_ca = ptv3_apply_point_ca
         self.ptv3_backend = ptv3_backend
+        self.use_polar_material_conditioning = use_polar_material_conditioning
+        self.use_target_reconstruction = use_target_reconstruction
+        self.target_reconstruction_weight = target_reconstruction_weight
+        self.target_mask_loss_weight = target_mask_loss_weight
+        self.target_reconstruction_max_points = target_reconstruction_max_points
 
         # classification head
         self.ptv3_clf_head_pos_bins = ptv3_clf_head_pos_bins

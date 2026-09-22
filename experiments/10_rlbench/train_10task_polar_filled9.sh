@@ -79,5 +79,9 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_input_channels 9 \
     --ptv3_clf_head_pos_bins 100 \
     --action_head_pos_center moe \
-    --ptv3_apply_point_ca False \
+    --ptv3_apply_point_ca "${PTV3_APPLY_POINT_CA:-False}" \
+    --use_target_reconstruction "${USE_TARGET_RECONSTRUCTION:-False}" \
+    --target_reconstruction_weight "${TARGET_RECONSTRUCTION_WEIGHT:-0.1}" \
+    --target_mask_loss_weight "${TARGET_MASK_LOSS_WEIGHT:-0.1}" \
+    --target_reconstruction_max_points "${TARGET_RECONSTRUCTION_MAX_POINTS:-256}" \
     --ptv3_init_ckpt_file "$ptv3_init_ckpt_file"

@@ -105,6 +105,9 @@ class MonolithicPrompt:
         if points is not None:
             sources["points"] = points
             sources["npoints_in_batch"] = points.size(0)
+            for key in ("material_rgb", "polar_dense", "material_candidates", "point_pixel_indices", "target_points", "target_input_mask"):
+                if key in item:
+                    sources[key] = item[key]
         return sources
 
 
@@ -137,6 +140,9 @@ class DualPrompt:
         if points is not None:
             sources["points"] = points
             sources["npoints_in_batch"] = len(points)
+            for key in ("material_rgb", "polar_dense", "material_candidates", "point_pixel_indices", "target_points", "target_input_mask"):
+                if key in item:
+                    sources[key] = item[key]
         return sources
 
 
@@ -419,6 +425,9 @@ class SupervisedDataset(Dataset):
         if points is not None:
             data_dict["points"] = points
             data_dict["npoints_in_batch"] = sources.get("npoints_in_batch", len(points))
+            for key in ("material_rgb", "polar_dense", "material_candidates", "point_pixel_indices", "target_points", "target_input_mask"):
+                if key in sources:
+                    data_dict[key] = sources[key]
 
         return data_dict
 

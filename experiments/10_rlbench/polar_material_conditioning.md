@@ -1,0 +1,16 @@
+# Optional polar and material conditioning
+
+Set `--use_polar_material_conditioning True` for `VLAEncDec3DWithActionClassificationModel` or `VLAEncDec3DWithActionRegressionModel` with the `concerto` PTv3 backend. The default is `False`, which leaves the existing model, inputs, and checkpoint format unchanged. The point cloud still has nine channels (`XYZ, RGB, DoLP, cos2AoLP, sin2AoLP`). This branch does not add action-to-image attention or a point completion network.
+
+The optional path reads full-resolution RGB and polar images, 32-value numeric candidate material vectors, and one flattened image pixel index per point. It learns image-region to candidate-material scores with an unknown-material option. A convolution produces a condition map; the point's original pixel index samples that map. The result is added after PTv3's initial point embedding. Both original and HouseCat-style depth-filled points are sampled in exactly the same way. The point's pixel index stays paired with it during workspace filtering and random point sampling.
+
+The included datasets demonstrate both sidecar formats:
+
+- `data_configs/data-phone-polar-material-conditioned.yaml` reads the existing one-episode filled cloud, its `.npy` point indices, and the original rendered `.npz` polar frames.
+- `data_configs/data-10task-polar-material-conditioned.yaml` reads the filled cloud, point-index LMDB, and dense-polar LMDB from the ten-task export. The ten-task data directory must already exist.
+
+Run `bash experiments/10_rlbench/train_phone_polar_material_conditioned.sh` for a one-episode GPU smoke run. `MAX_STEPS=1` limits it to one training step; `VLM_PATH` and `OUTPUT_DIR` override the defaults. For ten-task training, use the ten-task YAML as `--data-path` with the same model flag and `--ptv3_input_channels 9`. A material profile JSON file can contain a `presets` object (the included Mitsuba profiles) or a top-level mapping of candidate names to optical properties. `material_candidate_names` in the YAML optionally selects a subset. The encoder uses material type, RGB-wavelength samples of eta/k, roughness, IOR, diffuse reflectance, specular reflectance, and explicit masks for missing coefficients. It never needs a per-pixel material label as an input.
+
+Training the branch with these datasets uses the existing action loss. That loss **does not establish physically correct material identities**; it learns material-conditioned features useful to the action task. If material identity accuracy is needed, a separate pixel/region material-label loss and corresponding labels are still required. The current renderer/exporter does not provide those labels.
+
+At inference, pass batched `observation.points` with RGB in `[0,1]`, matching `point_pixel_indices` (`row * width + column`), a `[B,4,H,W]` `polar_dense` tensor ordered `[DoLP, cos2AoLP, sin2AoLP, angle_valid]`, and the camera RGB image under its configured observation key. The processor loads candidate vectors from the saved training configuration. `material_candidates` in the batch may override them. Pixel indices must refer to that same camera image. The conditioned inference path keeps the original point rows during subsampling so their pixels and polar features stay aligned.

@@ -17,6 +17,10 @@ from pointact.model.vla_pointact.action_head_3d.ptv3_backbone import (
     PointTransformerUnet,
     PointTransformerUnetWithAction,
 )
+from pointact.model.vla_pointact.polar_material_conditioner import PolarMaterialConditioner
+from pointact.model.vla_pointact.target_reconstruction import (
+    VisibleTargetReconstructionHead, copy_point_tree,
+)
 from pointact.model.vla_pointact.action_head_3d.regression_head import (
     PointMoERegressionMLPActionHead,
     PointWithActionRegressionMLPActionHead,
@@ -60,6 +64,20 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
     
     def get_input_embeddings(self):
         return self.vlm_backbone.get_input_embeddings()
+
+    def _material_point_condition(self, npoints_in_batch, **inputs):
+        if not self.config.use_polar_material_conditioning:
+            if any(value is not None for value in inputs.values()):
+                raise ValueError("Material tensors were provided but use_polar_material_conditioning is disabled")
+            return None
+        missing = [key for key, value in inputs.items() if value is None and key != "material_candidate_mask"]
+        if missing:
+            raise ValueError(f"Material conditioning is enabled; missing inputs: {missing}")
+        condition, _ = self.polar_material_conditioner(
+            inputs["material_rgb"], inputs["polar_dense"], inputs["material_candidates"],
+            inputs["point_pixel_indices"], npoints_in_batch, inputs["material_candidate_mask"],
+        )
+        return condition
 
     @abstractmethod
     def compute_action_loss(
@@ -146,6 +164,14 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         action_is_pad: torch.Tensor | None = None,
         points: torch.Tensor | None = None,
         npoints_in_batch: torch.Tensor | None = None,
+        material_rgb: torch.Tensor | None = None,
+        polar_dense: torch.Tensor | None = None,
+        material_candidates: torch.Tensor | None = None,
+        material_candidate_mask: torch.Tensor | None = None,
+        point_pixel_indices: torch.Tensor | None = None,
+        target_points: torch.Tensor | None = None,
+        target_counts: torch.Tensor | None = None,
+        target_input_mask: torch.Tensor | None = None,
         input_id_lens: list[int] = None,
         **kwargs,
     ) -> VLADualOutputWithPast:
@@ -193,6 +219,11 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 points=points,
                 npoints_in_batch=npoints_in_batch,
                 input_id_lens=input_id_lens,
+                material_rgb=material_rgb,
+                polar_dense=polar_dense,
+                material_candidates=material_candidates,
+                material_candidate_mask=material_candidate_mask,
+                point_pixel_indices=point_pixel_indices,
             )
         else:
             outputs = self.vlm_backbone.model(
@@ -211,15 +242,35 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
 
         loss = None
         action_loss = None
+        target_reconstruction_loss = None
         if actions is not None:
-            action_loss = self.compute_action_loss(
+            auxiliary_labels = {}
+            if getattr(self.config, "use_target_reconstruction", False) and self.training:
+                auxiliary_labels = {
+                    "target_points": target_points,
+                    "target_counts": target_counts,
+                    "target_input_mask": target_input_mask,
+                }
+            action_result = self.compute_action_loss(
                 points, npoints_in_batch, 
                 hidden_states, input_id_lens,
                 states, actions, action_is_pad,
+                material_rgb=material_rgb,
+                polar_dense=polar_dense,
+                material_candidates=material_candidates,
+                material_candidate_mask=material_candidate_mask,
+                point_pixel_indices=point_pixel_indices,
+                **auxiliary_labels,
             )
-            if isinstance(action_loss, tuple):
-                action_loss = action_loss[0]
+            if isinstance(action_result, tuple):
+                action_loss = action_result[0]
+                if len(action_result) > 2:
+                    target_reconstruction_loss = action_result[2]
+            else:
+                action_loss = action_result
             loss = action_loss
+            if target_reconstruction_loss is not None:
+                loss = loss + self.config.target_reconstruction_weight * target_reconstruction_loss
 
         text_loss = None
         logits = None
@@ -236,6 +287,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             loss=loss,
             action_loss=action_loss,
             text_loss=text_loss,
+            target_reconstruction_loss=target_reconstruction_loss,
             actions=output_actions,
             logits=logits,
             past_key_values=outputs.past_key_values,
@@ -258,6 +310,11 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         states: torch.Tensor | None = None,
         points: torch.Tensor | None = None,
         npoints_in_batch = None,
+        material_rgb: torch.Tensor | None = None,
+        polar_dense: torch.Tensor | None = None,
+        material_candidates: torch.Tensor | None = None,
+        material_candidate_mask: torch.Tensor | None = None,
+        point_pixel_indices: torch.Tensor | None = None,
         input_id_lens: list[int] = None,
         **kwargs,
     ) -> Tensor:
@@ -300,7 +357,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         pred_actions = self.compute_action(
             points, npoints_in_batch,
             hidden_states, input_id_lens,
-            states, 
+            states,
+            material_rgb=material_rgb,
+            polar_dense=polar_dense,
+            material_candidates=material_candidates,
+            material_candidate_mask=material_candidate_mask,
+            point_pixel_indices=point_pixel_indices,
         )
     
         return pred_actions, outputs
@@ -605,7 +667,19 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             enc_mode=self.config.ptv3_enc_mode,
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
+            auxiliary_decoder=self.config.use_target_reconstruction,
         )
+        if self.config.use_target_reconstruction:
+            if self.config.target_reconstruction_weight < 0 or self.config.target_mask_loss_weight < 0:
+                raise ValueError("Target reconstruction loss weights must be nonnegative")
+            self.target_reconstruction_head = VisibleTargetReconstructionHead(
+                self.config.ptv3_dec_channels[0],
+                self.config.target_reconstruction_max_points,
+            )
+        if self.config.use_polar_material_conditioning:
+            if self.config.ptv3_backend != "concerto":
+                raise ValueError("Polar material conditioning currently requires the concerto PTv3 backend")
+            self.polar_material_conditioner = PolarMaterialConditioner(self.ptv3_model.enc_channels[0])
         if self.config.action_head_pos_center != "moe":
             # the mlp layers in the last point layer won"t be used
             if self.config.ptv3_enc_mode:
@@ -664,12 +738,16 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         self.to_float32_action_head()
 
     def to_float32_action_head(self):
+        if self.config.use_polar_material_conditioning:
+            self.polar_material_conditioner = self.polar_material_conditioner.to(dtype=torch.float32)
         self.ctx_proj = self.ctx_proj.to(dtype=torch.float32)
         if self.config.use_robot_state:
             self.state_encoder = self.state_encoder.to(dtype=torch.float32)
         self.ptv3_model = self.ptv3_model.to(dtype=torch.float32)
         self.position_embedding = self.position_embedding.to(dtype=torch.float32)
         self.action_head = self.action_head.to(dtype=torch.float32)
+        if self.config.use_target_reconstruction:
+            self.target_reconstruction_head = self.target_reconstruction_head.to(dtype=torch.float32)
 
     def compute_action_loss(
         self,
@@ -680,11 +758,15 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         states: torch.Tensor,
         actions: torch.Tensor,
         action_is_pad: torch.Tensor,
+        target_points: torch.Tensor | None = None,
+        target_counts: torch.Tensor | None = None,
+        target_input_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> Tensor:
         outs = self.compute_action(
             points, npoints_in_batch, ctx_embeds, ctx_lens, states,
             return_intermediate_value=True,
+            **kwargs,
         )
 
         action_masks = action_is_pad.logical_not()
@@ -701,6 +783,17 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             )
         else:
             raise NotImplementedError(f"unsupported {self.config.action_head_pos_center}")
+
+        if self.config.use_target_reconstruction and self.training:
+            if target_points is None or target_counts is None or target_input_mask is None:
+                raise ValueError("Target reconstruction training requires visible target labels")
+            decoded = self.ptv3_model.ptv3_model.dec(copy_point_tree(outs["encoder_point"]))
+            mask_loss, geometry_loss = self.target_reconstruction_head.loss(
+                decoded.feat, decoded.coord, decoded.offset,
+                target_points, target_counts, target_input_mask,
+            )
+            reconstruction_loss = geometry_loss + self.config.target_mask_loss_weight * mask_loss
+            return action_loss, (pos_loss, rot_loss, open_loss), reconstruction_loss
 
         return action_loss, (pos_loss, rot_loss, open_loss)
  
@@ -729,10 +822,15 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             state_embs = self.state_encoder(states.unsqueeze(1), embodiment_id)
             action_features = torch.cat([state_embs, action_features], dim=1)
 
-        point_fts, point_coords, point_offsets, action_out_embeds = self.ptv3_model(
+        encoder_output = self.ptv3_model(
             points, npoints_in_batch, ctx_embeds, ctx_lens,
-            action_features
+            action_features,
+            point_condition=self._material_point_condition(npoints_in_batch, **kwargs),
+            return_encoder_point=(
+                self.config.use_target_reconstruction and self.training and return_intermediate_value
+            ),
         )
+        point_fts, point_coords, point_offsets, action_out_embeds = encoder_output[:4]
         out_npoints_in_batch = torch.diff(
             point_offsets, prepend=torch.tensor([0], device=device, dtype=torch.long)
         )
@@ -759,6 +857,8 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 "point_coords": point_coords,
                 "npoints_in_batch": out_npoints_in_batch,
             }
+            if len(encoder_output) == 5:
+                outs["encoder_point"] = encoder_output[4]
             return outs
 
         return pred_actions
@@ -790,6 +890,10 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
         )
+        if self.config.use_polar_material_conditioning:
+            if self.config.ptv3_backend != "concerto":
+                raise ValueError("Polar material conditioning currently requires the concerto PTv3 backend")
+            self.polar_material_conditioner = PolarMaterialConditioner(self.ptv3_model.enc_channels[0])
         if self.config.action_head_pos_center != "moe":
             # the mlp layers in the last point layer won"t be used
             if self.config.ptv3_enc_mode:
@@ -834,6 +938,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         self.to_float32_action_head()
 
     def to_float32_action_head(self):
+        if self.config.use_polar_material_conditioning:
+            self.polar_material_conditioner = self.polar_material_conditioner.to(dtype=torch.float32)
         self.ctx_proj = self.ctx_proj.to(dtype=torch.float32)
         if self.config.use_robot_state:
             self.state_encoder = self.state_encoder.to(dtype=torch.float32)
@@ -854,6 +960,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
     ) -> Tensor:
         pred_actions = self.compute_action(
             points, npoints_in_batch, ctx_embeds, ctx_lens, states,
+            **kwargs,
         )
         if self.config.action_regression_loss == "l2":
             action_losses = F.mse_loss(pred_actions, actions, reduction="none")
@@ -898,7 +1005,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
 
         point_fts, point_coords, point_offsets, action_out_embeds = self.ptv3_model(
             points, npoints_in_batch, ctx_embeds, ctx_lens,
-            action_features
+            action_features,
+            point_condition=self._material_point_condition(npoints_in_batch, **kwargs),
         )
         out_npoints_in_batch = torch.diff(
             point_offsets, prepend=torch.tensor([0], device=device, dtype=torch.long)

@@ -132,9 +132,12 @@ class PointTransformerUnetWithAction(nn.Module):
         patch_size=128,
         apply_point_ca=True,
         ptv3_backend="concerto",
+        auxiliary_decoder=False,
     ):
         super().__init__()
 
+        if auxiliary_decoder and (not enc_mode or ptv3_backend != "concerto"):
+            raise ValueError("Auxiliary decoder requires the concerto encoder-only action backbone")
         ptv3_model_cls = get_ptv3_model_cls(ptv3_backend, with_action=True)
         self.ptv3_model = ptv3_model_cls(
             in_channels=input_size,
@@ -158,9 +161,10 @@ class PointTransformerUnetWithAction(nn.Module):
             pre_norm=True,
             shuffle_orders=True,
             enable_flash=True,
-            enc_mode=enc_mode,
+            enc_mode=enc_mode and not auxiliary_decoder,
             apply_point_ca=apply_point_ca
         )
+        self.auxiliary_decoder = auxiliary_decoder
         self.enc_channels = enc_channels
         if enc_mode:
             self.output_size = enc_channels[-1]
@@ -170,7 +174,7 @@ class PointTransformerUnetWithAction(nn.Module):
 
     def prepare_ptv3_batch(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_feat, 
-        time_embeds=None,
+        time_embeds=None, point_condition=None,
     ):
         device = pc_fts.device
 
@@ -192,6 +196,10 @@ class PointTransformerUnetWithAction(nn.Module):
         )
         outs['context_offset'] = torch.cumsum(ctx_lens, dim=0).to(device)
         outs['action_feat'] = action_feat
+        if point_condition is not None:
+            if point_condition.shape != (len(pc_fts), self.enc_channels[0]):
+                raise ValueError("Point condition shape must match the PTv3 embedding")
+            outs['point_condition'] = point_condition
         if time_embeds is not None:
             outs['time_embeds'] = time_embeds
 
@@ -199,20 +207,23 @@ class PointTransformerUnetWithAction(nn.Module):
         
     def forward(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_embeds, 
-        time_embeds=None
+        time_embeds=None, point_condition=None, return_encoder_point=False,
     ):
 
         ptv3_batch = self.prepare_ptv3_batch(
             pc_fts, npoints_in_batch, ctx_embeds, ctx_lens,
-            action_embeds, time_embeds=time_embeds
+            action_embeds, time_embeds=time_embeds, point_condition=point_condition
         )
         
         # print(self.ptv3_model)
         # for k, v in ptv3_batch.items():
         #     if isinstance(v, torch.Tensor):
         #         print(k, v.size())
-        point_outs = self.ptv3_model(ptv3_batch)
+        point_outs = self.ptv3_model(
+            ptv3_batch, return_encoder=self.auxiliary_decoder
+        ) if self.auxiliary_decoder else self.ptv3_model(ptv3_batch)
 
         action_out_embeds = point_outs.action_feat
         
-        return point_outs.feat, point_outs.coord, point_outs.offset, action_out_embeds
+        result = (point_outs.feat, point_outs.coord, point_outs.offset, action_out_embeds)
+        return (*result, point_outs) if return_encoder_point else result
