@@ -74,5 +74,4 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_clf_head_pos_bins 100 \
     --action_head_pos_center moe \
     --ptv3_apply_point_ca False \
-    --use_polar_material_conditioning False \
     --ptv3_init_ckpt_file "$ptv3_init_ckpt_file"
