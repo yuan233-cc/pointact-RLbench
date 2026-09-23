@@ -112,8 +112,27 @@ def project_current_pixels(points: np.ndarray, camera: dict) -> tuple[np.ndarray
     z = camera_points[:, 2]
     uv = camera_points[:, :2] / np.maximum(z[:, None], 1e-8)
     uv = uv @ intrinsics[:2, :2].T + intrinsics[:2, 2]
-    pixels = np.floor(uv).astype(np.int32)
+    pixels = np.floor(uv + 1e-4).astype(np.int32)
     return pixels, z
+
+
+def rlbench_pointcloud(depth: np.ndarray, camera: dict) -> np.ndarray:
+    """Reproduce PyRep's depth unprojection from archived camera parameters."""
+    depth = np.asarray(depth, dtype=np.float32)
+    height, width = depth.shape
+    u, v = np.meshgrid(np.arange(width, dtype=np.float32),
+                       np.arange(height, dtype=np.float32))
+    pixel_depth = np.stack((u * depth, v * depth, depth), axis=-1)
+    to_world = np.asarray(camera["to_world"], dtype=np.float64)
+    intrinsics = np.asarray(camera["intrinsics"], dtype=np.float64)
+    rotation = to_world[:3, :3]
+    center = to_world[:3, 3:4]
+    world_to_camera = np.concatenate((rotation.T, -rotation.T @ center), axis=1)
+    projection = intrinsics @ world_to_camera
+    inverse = np.linalg.inv(np.vstack((projection, [0., 0., 0., 1.])))[:3]
+    homogeneous = np.concatenate(
+        (pixel_depth, np.ones((height, width, 1), dtype=np.float32)), axis=-1)
+    return (homogeneous.reshape(-1, 4) @ inverse.T).reshape(height, width, 3).astype(np.float32)
 
 
 def export_record(frame_path: Path, snapshot_path: Path, cloud: np.ndarray,
@@ -128,11 +147,16 @@ def export_record(frame_path: Path, snapshot_path: Path, cloud: np.ndarray,
         if not handles:
             raise ValueError(f"No target mesh for {group_name}: {mesh_names} in {snapshot_path}")
         group_handles.append(handles)
+    camera = snapshot["cameras"]["front"]
     with np.load(frame_path) as frame:
-        depth = np.asarray(frame["depth_m"], dtype=np.float32)
-        group_masks = [np.isin(frame["object_mask"], handles) for handles in group_handles]
+        # Reconstruction supervision must use the same RLBench/CoppeliaSim
+        # geometry as the repaired point cloud. Native depth/object buffers in
+        # the old render include the wireframe workspace helper and are stale.
+        depth = np.asarray(frame["coppelia_depth_m"], dtype=np.float32)
+        object_mask = np.asarray(frame["coppelia_object_mask"], dtype=np.int32)
+        group_masks = [np.isin(object_mask, handles) for handles in group_handles]
         mask = np.logical_or.reduce(group_masks)
-        dense_points = np.asarray(frame["point_cloud"], dtype=np.float32)
+        dense_points = rlbench_pointcloud(depth, camera)
         valid = np.isfinite(depth) & (depth > 0) & np.isfinite(dense_points).all(axis=-1)
         if isinstance(mesh_spec, dict):
             sampled_groups = [sample_target(dense_points[valid & group_mask],
@@ -142,7 +166,7 @@ def export_record(frame_path: Path, snapshot_path: Path, cloud: np.ndarray,
         else:
             target_points = sample_target(dense_points[valid & mask], limit, voxel_size, seed)
 
-        pixels, z = project_current_pixels(cloud[:, :3], snapshot["cameras"]["front"])
+        pixels, z = project_current_pixels(cloud[:, :3], camera)
         height, width = mask.shape
         inside = ((pixels[:, 0] >= 0) & (pixels[:, 0] < width) &
                   (pixels[:, 1] >= 0) & (pixels[:, 1] < height) & (z > 0))
@@ -169,7 +193,9 @@ def main() -> None:
     if args.max_points < 1 or args.voxel_size <= 0:
         parser.error("max-points and voxel-size must be positive")
     target_meshes = TARGET_MESHES if args.task_map is None else json.loads(args.task_map.read_text())
-    source_meta = json.loads((args.dataset / "meta/polar_incomplete_features.json").read_text())
+    repaired_meta = args.dataset / "meta/polar_rlbench9_repair.json"
+    source_meta = json.loads((repaired_meta if repaired_meta.exists() else
+                              args.dataset / "meta/polar_incomplete_features.json").read_text())
     records = [json.loads(line) for line in (args.dataset / "frame_corruption_stats.jsonl").read_text().splitlines()]
     if args.limit_frames is not None:
         records = records[:args.limit_frames]
@@ -184,7 +210,8 @@ def main() -> None:
                        readonly=True, lock=False, readahead=False)
     sink = lmdb.open(str(stage), map_size=1024**3)
     tasks = source_meta["tasks"]
-    episodes_per_task = source_meta["episodes_per_task"]
+    episodes_per_task = source_meta.get("episodes_per_task",
+                                        source_meta["total_episodes"] // len(tasks))
     nonempty = 0
     try:
         with source.begin(buffers=True) as read_txn:
@@ -202,7 +229,7 @@ def main() -> None:
                 cloud = np.asarray(msgpack.unpackb(value), dtype=np.float32)
                 raw_episode = args.raw / task / f"episode_{episode % episodes_per_task:06d}"
                 label = export_record(
-                    raw_episode / "frames_spp512" / f"{frame_index:06d}.npz",
+                    raw_episode / "frames" / f"{frame_index:06d}.npz",
                     raw_episode / "snapshots/frames" / f"{frame_index:06d}.json",
                     cloud, target_meshes[task], args.max_points, args.voxel_size,
                     episode * 10000 + frame_index,
@@ -225,6 +252,7 @@ def main() -> None:
                 isinstance(next(iter(target_meshes.values())), dict) else "uniform_target"
             ),
             "source_raw": str(args.raw),
+            "geometry_source": "RLBench CoppeliaSim depth/object mask",
         }, indent=2) + "\n")
     finally:
         source.close()

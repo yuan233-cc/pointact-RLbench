@@ -44,9 +44,10 @@ class ClassifierActionStatsTests(unittest.TestCase):
             }],
         }))
 
-    def run_prepare(self):
+    def run_prepare(self, *extra_args):
         return subprocess.run(
-            [sys.executable, str(PREPARE), str(self.config_path), str(self.root / "runtime")],
+            [sys.executable, str(PREPARE), str(self.config_path), str(self.root / "runtime"),
+             *map(str, extra_args)],
             cwd=REPO_ROOT, capture_output=True, text=True,
         )
 
@@ -94,6 +95,24 @@ class ClassifierActionStatsTests(unittest.TestCase):
         result = self.run_prepare()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("expected filled9", result.stderr)
+
+    def test_mounted_dataset_root_rewrites_data_and_stats_paths(self):
+        dataset_root = self.root / "polar-dataset"
+        (dataset_root / "meta").mkdir(parents=True)
+        (dataset_root / "meta/info.json").write_text("{}")
+        stats_dir = dataset_root / "robot_state_action_stats"
+        stats_dir.mkdir()
+        mounted_stats = stats_dir / self.stats_path.name
+        mounted_stats.write_text(json.dumps(self.stats))
+
+        result = self.run_prepare("--dataset-root", dataset_root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_config = yaml.safe_load(Path(result.stdout.strip()).read_text())
+        dataset = output_config["lerobot_datasets"][0]
+        self.assertEqual(Path(dataset["root"]), dataset_root.parent)
+        corrected = json.loads(Path(dataset["state_action_norm_file"]).read_text())
+        self.assertEqual(corrected["action_mean"], [0.0] * 7)
+        self.assertIn(str(mounted_stats), result.stderr)
 
 
 if __name__ == "__main__":

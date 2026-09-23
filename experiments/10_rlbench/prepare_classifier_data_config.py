@@ -33,7 +33,7 @@ def _read_stats(path: Path) -> dict:
     return stats
 
 
-def prepare(input_config: Path, output_dir: Path) -> Path:
+def prepare(input_config: Path, output_dir: Path, dataset_root: Path | None = None) -> Path:
     input_config = input_config.resolve(strict=True)
     with input_config.open() as handle:
         config = yaml.safe_load(handle)
@@ -41,6 +41,12 @@ def prepare(input_config: Path, output_dir: Path) -> Path:
         raise ValueError(f"{input_config}: expected a lerobot_datasets list")
     if not config["lerobot_datasets"]:
         raise ValueError(f"{input_config}: no LeRobot dataset configured")
+    if dataset_root is not None:
+        if len(config["lerobot_datasets"]) != 1:
+            raise ValueError("--dataset-root requires exactly one LeRobot dataset")
+        dataset_root = dataset_root.resolve(strict=True)
+        if not (dataset_root / "meta/info.json").is_file():
+            raise ValueError(f"{dataset_root}: meta/info.json is missing")
 
     replacements = []
     for index, dataset in enumerate(config["lerobot_datasets"]):
@@ -54,9 +60,18 @@ def prepare(input_config: Path, output_dir: Path) -> Path:
         source = dataset.get("state_action_norm_file")
         if not isinstance(source, str) or not source:
             raise ValueError(f"Dataset {index}: state_action_norm_file is required")
-        source_path = Path(source)
-        if not source_path.is_absolute():
-            source_path = Path.cwd() / source_path
+        if dataset_root is not None:
+            if dataset.get("repo_id") != dataset_root.name:
+                raise ValueError(
+                    f"Dataset {index}: repo_id={dataset.get('repo_id')!r} does not match "
+                    f"mounted dataset {dataset_root.name!r}"
+                )
+            dataset["root"] = str(dataset_root.parent)
+            source_path = dataset_root / "robot_state_action_stats" / Path(source).name
+        else:
+            source_path = Path(source)
+            if not source_path.is_absolute():
+                source_path = Path.cwd() / source_path
         source_path = source_path.resolve(strict=True)
         stats = _read_stats(source_path)
         original_mean = stats["action_mean"]
@@ -84,8 +99,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input_config", type=Path)
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument(
+        "--dataset-root", type=Path,
+        help="Mounted dataset directory; rewrites root and normalization paths in the run-local config",
+    )
     args = parser.parse_args()
-    print(prepare(args.input_config, args.output_dir))
+    print(prepare(args.input_config, args.output_dir, args.dataset_root))
 
 
 if __name__ == "__main__":

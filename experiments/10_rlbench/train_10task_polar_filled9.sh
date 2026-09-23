@@ -32,12 +32,16 @@ fi
 # Classification targets must be raw XYZ/Euler/gripper values. The published
 # polar archive has action mean/std from regression preprocessing, so create a
 # run-local corrected copy instead of mutating the mounted dataset.
-data_path="$(python experiments/10_rlbench/prepare_classifier_data_config.py \
-    "$data_path" "$output_dir/classifier_input_config")"
+prepare_args=("$data_path" "$output_dir/classifier_input_config")
+if [[ -n "${DATASET_ROOT:-}" ]]; then
+    prepare_args+=(--dataset-root "$DATASET_ROOT")
+fi
+data_path="$(python experiments/10_rlbench/prepare_classifier_data_config.py "${prepare_args[@]}")"
 
 accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
     --output_dir "$output_dir" \
+    --run-name "${RUN_NAME:-$(basename "$output_dir")}" \
     --vlm-name-or-path "${VLM_PATH:-Qwen/Qwen2.5-VL-3B-Instruct}" \
     --data-path "$data_path" \
     --chunk-size 1 \
