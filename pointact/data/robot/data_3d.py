@@ -294,7 +294,19 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if point_cloud is None:
             raise KeyError(f"Point cloud '{point_key}' not found in {self.point_cloud_dir}")
         point_cloud = np.asarray(msgpack.unpackb(point_cloud), dtype=np.float32).copy()
-        if self.point_feature_mode == "xyzrgb_polar":
+        if self.point_feature_mode == "xyzrgb":
+            if point_cloud.ndim != 2 or point_cloud.shape[1] not in (6, 9):
+                raise ValueError(
+                    f"XYZRGB point cloud '{point_key}' must have shape Nx6, or Nx9 "
+                    f"when reading an XYZRGB+polar archive, got {point_cloud.shape}"
+                )
+            # Let six-channel ablations use the exact same geometry, RGB and
+            # point sampling as a polar archive without duplicating its LMDB.
+            # The three optical channels are deliberately removed here.
+            point_cloud = np.ascontiguousarray(point_cloud[:, :6])
+            if not np.isfinite(point_cloud).all():
+                raise ValueError(f"XYZRGB point cloud '{point_key}' has non-finite values")
+        else:
             if point_cloud.ndim != 2 or point_cloud.shape[1] != 9:
                 raise ValueError(
                     f"Polar point cloud '{point_key}' must have shape Nx9 "
