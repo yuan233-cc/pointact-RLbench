@@ -6,7 +6,7 @@ export HF_DATASETS_OFFLINE=1
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 
 GPUS=${GPUS:-1}
-PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-128} #64
+PER_DEVICE_BATCH_SIZE=${PER_DEVICE_BATCH_SIZE:-512}
 
 # Build accelerate arguments based on GPU count
 if [ $GPUS -eq 1 ]; then
@@ -25,9 +25,9 @@ dataset=${DATASET_CONFIG:-experiments/10_rlbench/data_configs/data-hybridvla-poi
 dataset_name=${DATASET_NAME:-keysteps-euler-points.frontview-no.image-aug.30}
 
 # hparams
-lr=5e-5
-mlr=5e-5
-vlr=2e-5
+lr=${LEARNING_RATE:-1e-4}
+mlr=${MERGER_LR:-1e-4}
+vlr=${VISION_LR:-4e-5}
 
 chunk_size=1
 epoch=${EPOCHS:-1000} #3000
@@ -58,7 +58,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --vlm-name-or-path "${VLM_PATH:-Qwen/Qwen2.5-VL-3B-Instruct}" \
     --data-path "${dataset}" \
     --chunk-size ${chunk_size} \
-    --dataloader-num-workers 8 \
+    --dataloader-num-workers ${DATALOADER_NUM_WORKERS:-8} \
     --freeze-vision-tower True \
     --freeze-llm True \
     --freeze-merger True \
@@ -66,18 +66,20 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --tf32 ${TF32_SUPPORT} \
     --fp16 False \
     --num-train-epochs ${epoch} \
+    --max-steps ${MAX_STEPS:--1} \
     --per-device-train-batch-size ${PER_DEVICE_BATCH_SIZE} \
+    --gradient-accumulation-steps 1 \
     --learning-rate ${lr} \
     --merger-lr ${mlr} \
     --vision-lr ${vlr} \
     --weight-decay 0.001 \
-    --warmup-steps 0.03 \
+    --warmup-steps ${WARMUP_STEPS:-0.03} \
     --lr-scheduler-type cosine \
-    --gradient-checkpointing True \
+    --gradient-checkpointing ${GRADIENT_CHECKPOINTING:-False} \
     --save-strategy steps \
-    --logging-steps 10 \
-    --save-steps 2000 \
-    --save-total-limit 10 \
+    --logging-steps ${LOGGING_STEPS:-3} \
+    --save-steps ${SAVE_STEPS:-500} \
+    --save-total-limit ${SAVE_TOTAL_LIMIT:-10} \
     --run-name "${run_name}" \
     --attn-implementation flash_attention_2 \
     --log_level info \
