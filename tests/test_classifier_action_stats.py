@@ -96,6 +96,31 @@ class ClassifierActionStatsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("expected filled9", result.stderr)
 
+    def test_accepts_xyz_polar_features_from_filled9(self):
+        config = yaml.safe_load(self.config_path.read_text())
+        config["lerobot_datasets"][0]["point_feature_mode"] = "xyz_polar"
+        self.config_path.write_text(yaml.safe_dump(config))
+
+        result = self.run_prepare()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_config = yaml.safe_load(Path(result.stdout.strip()).read_text())
+        self.assertEqual(
+            output_config["lerobot_datasets"][0]["point_feature_mode"],
+            "xyz_polar",
+        )
+
+    def test_accepts_xyzrgb_control_from_filled9(self):
+        config = yaml.safe_load(self.config_path.read_text())
+        config["lerobot_datasets"][0]["point_feature_mode"] = "xyzrgb"
+        self.config_path.write_text(yaml.safe_dump(config))
+
+        result = self.run_prepare()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_config = yaml.safe_load(Path(result.stdout.strip()).read_text())
+        self.assertEqual(output_config["lerobot_datasets"][0]["point_feature_mode"], "xyzrgb")
+
     def test_mounted_dataset_root_rewrites_data_and_stats_paths(self):
         dataset_root = self.root / "polar-dataset"
         (dataset_root / "meta").mkdir(parents=True)

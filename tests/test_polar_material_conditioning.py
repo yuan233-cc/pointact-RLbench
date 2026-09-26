@@ -1,7 +1,12 @@
 import numpy as np
 import torch
 
-from pointact.data.polar_material import MATERIAL_FEATURE_DIM, dense_polar_from_npz, material_vector
+from pointact.data.polar_material import (
+    MATERIAL_FEATURE_DIM,
+    dense_polar_from_npz,
+    material_vector,
+    polar_vlm_image,
+)
 from pointact.model.vla_pointact.polar_material_conditioner import PolarMaterialConditioner
 from pointact.model.vla_pointact.action_head_3d.ptv3_backbone import PointTransformerUnetWithAction
 
@@ -23,6 +28,21 @@ def test_dense_polar_retains_polar_only_hole_pixels(tmp_path):
     dense = dense_polar_from_npz(path)
     assert dense.shape == (4, 2, 2)
     assert dense[3].sum() == 4  # no depth, yet the polar angles remain observable
+
+
+def test_polar_vlm_image_has_fixed_channels_and_zero_invalid_angles():
+    dense = torch.tensor([
+        [[0.25, 1.25], [float("nan"), 0.75]],
+        [[-1.0, 1.0], [0.5, -0.5]],
+        [[1.0, -1.0], [0.0, 0.5]],
+        [[1.0, 1.0], [0.0, 0.0]],
+    ])
+    image = polar_vlm_image(dense)
+    assert image.shape == (3, 2, 2)
+    torch.testing.assert_close(image[:, 0, 0], torch.tensor([0.25, 0.0, 1.0]))
+    torch.testing.assert_close(image[:, 0, 1], torch.tensor([1.0, 1.0, 0.0]))
+    torch.testing.assert_close(image[:, 1, 0], torch.zeros(3))
+    torch.testing.assert_close(image[:, 1, 1], torch.tensor([0.75, 0.0, 0.0]))
 
 
 def test_conditioned_points_follow_pixel_indices_and_backpropagate():

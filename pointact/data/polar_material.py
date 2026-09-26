@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 
 
 MATERIAL_FEATURE_DIM = 32  # 16 values followed by their availability masks
@@ -74,3 +75,24 @@ def dense_polar_from_npz(source) -> np.ndarray:
 
 def dense_polar_from_bytes(payload: bytes) -> np.ndarray:
     return dense_polar_from_npz(io.BytesIO(payload))
+
+
+def polar_vlm_image(dense_polar) -> torch.Tensor:
+    """Encode dense polar values as a three-channel image in [0, 1].
+
+    The channels are DoLP, encoded cos(2 AoLP), and encoded sin(2 AoLP).
+    Invalid angular pixels remain zero rather than being mapped to 0.5.
+    """
+    polar = torch.as_tensor(dense_polar, dtype=torch.float32)
+    if polar.ndim != 3 or polar.shape[0] != 4:
+        raise ValueError(f"Dense polar array must be [4,H,W], got {tuple(polar.shape)}")
+    polar = torch.nan_to_num(polar, nan=0.0, posinf=0.0, neginf=0.0)
+    valid = polar[3] > 0.5
+    image = torch.stack(
+        (
+            polar[0].clamp(0.0, 1.0),
+            torch.where(valid, (polar[1].clamp(-1.0, 1.0) + 1.0) * 0.5, 0.0),
+            torch.where(valid, (polar[2].clamp(-1.0, 1.0) + 1.0) * 0.5, 0.0),
+        )
+    )
+    return image.contiguous()

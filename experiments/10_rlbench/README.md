@@ -92,8 +92,9 @@ The matching example configuration is
 a CUDA GPU and the pretrained Qwen model available locally, run
 `bash experiments/10_rlbench/train_phone_polar_incomplete9_one_episode.sh` to
 exercise one training epoch with `--ptv3_input_channels 9`. Set
-`PTV3_INIT_CKPT_FILE` to a Concerto checkpoint to initialize its six original
-input channels and zero-initialize the three new polar weights. One episode is a
+`PTV3_INIT_CKPT_FILE` to a Concerto checkpoint to initialize the XYZRGB prefix
+and zero-initialize the three polar weights, even when the Concerto stem itself
+has nine inputs. One episode is a
 training smoke test, not a useful final policy dataset.
 
 To compare HouseCat-style depth filling on that episode, export a separate
@@ -147,6 +148,48 @@ selects `points_frontview_polar_filled9`, and uses its own normalization file.
 It keeps the nine-channel XYZRGB+polar PointACT path; material conditioning is
 disabled. The offline fill uses clean-source pixel provenance to locate holes,
 which is not available during live inference.
+
+The six-channel `xyz_polar` ablation uses the same rows and geometry but replaces
+RGB with `[DoLP, cos(2 AoLP), sin(2 AoLP)]`. It does not send an RGB image to the
+VLM and does not apply RGB augmentation to the polar tuple. Before the PTV3
+stem, the tuple is represented in `[0, 1]` and passed through the same `2*x-1`
+mapping as RGB, resulting in `[2*DoLP-1, cos(2 AoLP), sin(2 AoLP)]`. The three
+polar channels inherit Concerto's pretrained RGB input weights:
+
+```bash
+bash experiments/10_rlbench/train_10task_xyzpolar_filled6.sh
+# Optional training-only interaction reconstruction:
+bash experiments/10_rlbench/train_10task_xyzpolar_filled6_target_reconstruction.sh
+```
+
+For a controlled three-way classification ablation, train the XYZRGB control
+with the matched launcher below and compare it with
+`train_10task_polar_rlbench9_v2.sh` and `train_10task_xyzpolar_filled6.sh`:
+
+```bash
+bash experiments/10_rlbench/train_10task_xyzrgb_filled6_matched.sh
+```
+
+All three configurations read identical filled9 rows and use the same workspace,
+point budget, stochastic point retention, action statistics, no VLM image, no
+rotation, and spatial-sampling RNG. The two modes containing RGB retain the
+original PointACT RGB augmentation; the XYZ+polar mode has no RGB to augment.
+RGB and polar model features use the same `[-1, 1]` range. The nine-channel
+model copies Concerto's XYZRGB weights and zero-initializes its three added
+polar columns; the two six-channel models copy all six Concerto XYZRGB input
+columns. Existing checkpoints trained before these configuration fields were
+added retain their original preprocessing and should not be mixed into this
+controlled comparison.
+
+For evaluation, use `run_filled9_rlbench.py` as the client and
+`run_xyzpolar_filled6_server.py` as the policy server; the latter performs the
+same `[XYZ, polar]` column selection as training.
+The three controlled launchers share one training command. Its defaults are
+1000 epochs, batch size 512 per GPU, learning rate `1e-4`, cosine scheduling,
+seed/data seed 42, and a checkpoint every 500 steps. Override `OUTPUT_DIR`,
+`EPOCHS`, `PER_DEVICE_BATCH_SIZE`, `TRAIN_SEED`, or `DATA_SEED` through
+environment variables when needed. The one-episode launcher remains a
+one-epoch smoke test.
 These are newly generated trajectories, so episode numbers do not match the
 original RGB-only dataset. Optical material parameters are assumptions stored
 with the export, and the full polar maps cover valid camera-visible pixels.

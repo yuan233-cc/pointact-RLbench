@@ -52,10 +52,14 @@ class LerobotConfig:
     points_workspace: dict | None = None
     max_npoints: int = 4096
     augment_pc_rot: int = 0 # 0: no rotation augmentation on z-axis, [-rot, rot], unit: degrees
+    augment_point_color: bool = True
     point_cloud_dirname: str | None = None
-    point_feature_mode: str = "xyzrgb"  # xyzrgb, xyzrgb_polar (DoLP, cos2AoLP, sin2AoLP)
+    # xyz_polar replaces RGB with DoLP, cos(2 AoLP), sin(2 AoLP).
+    point_feature_mode: str = "xyzrgb"  # xyzrgb, xyz_polar, xyzrgb_polar
+    polar_feature_normalization: str = "raw"  # raw, rgb
     polar_dense_dirname: str | None = None
     polar_dense_frames_dir: str | None = None
+    vlm_image_mode: str = "rgb"  # rgb, polar
     point_pixel_dirname: str | None = None
     material_profiles_file: str | None = None
     material_candidate_names: list[str] | None = None

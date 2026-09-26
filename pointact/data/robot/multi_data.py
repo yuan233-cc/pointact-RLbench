@@ -197,7 +197,11 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             "state_action_norm": {},
             "points_workspace": {},
             "max_npoints": {},
+            "augment_point_color": {},
+            "point_feature_mode": {},
+            "polar_feature_normalization": {},
             "material_candidates": {},
+            "vlm_image_mode": {},
         }
         for data_config in self.data_configs:
             repo_id = data_config.repo_id.replace("/", ".")
@@ -205,6 +209,10 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             robot_config["is_action_eef"][repo_id] = data_config.is_action_eef
             robot_config["points_workspace"][repo_id] = data_config.points_workspace
             robot_config["max_npoints"][repo_id] = data_config.max_npoints
+            robot_config["augment_point_color"][repo_id] = data_config.augment_point_color
+            robot_config["point_feature_mode"][repo_id] = data_config.point_feature_mode
+            robot_config["polar_feature_normalization"][repo_id] = data_config.polar_feature_normalization
+            robot_config["vlm_image_mode"][repo_id] = data_config.vlm_image_mode
             if data_config.material_profiles_file is not None:
                 from pointact.data.polar_material import load_material_candidates
 

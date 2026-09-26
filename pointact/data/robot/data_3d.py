@@ -14,9 +14,15 @@ from pointact.constants import OBS_POINTS
 
 from pointact.data.robot.base import LeRobotDatasetMixin
 from pointact.data.robot.registry import register_robot_dataset
-from pointact.data.polar_material import dense_polar_from_bytes, dense_polar_from_npz, load_material_candidates
+from pointact.data.polar_material import (
+    dense_polar_from_bytes,
+    dense_polar_from_npz,
+    load_material_candidates,
+    polar_vlm_image,
+)
 from pointact.data.transforms.pointcloud import (
     augment_point_cloud_color,
+    normalize_polar_like_rgb,
     random_rotate_point_around_z,
     random_rotate_quat_around_z,
     random_rotate_delta_quat_around_z,
@@ -29,8 +35,9 @@ msgpack_numpy.patch()
 class LeRobotPointCloudDataset(LeRobotDatasetMixin):
     """LeRobot dataset variant backed by precomputed point clouds in LMDB.
 
-    Point cloud LMDB entries are xyzrgb with RGB in [0, 1]. The optional
-    xyzrgb_polar mode adds DoLP, cos(2 AoLP), and sin(2 AoLP) in that order.
+    Point cloud LMDB entries are xyzrgb with RGB in [0, 1]. ``xyz_polar``
+    replaces RGB with DoLP, cos(2 AoLP), and sin(2 AoLP), while
+    ``xyzrgb_polar`` appends those three polarization features after RGB.
     State/action tensors are treated as world-frame values before optional rotation augmentation and point-cloud centering.
     """
 
@@ -62,10 +69,13 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         points_workspace: dict | None = None,
         max_npoints: int = 4096,
         augment_pc_rot: int = 0,
+        augment_point_color: bool = True,
         point_cloud_dirname: str | None = None,
         point_feature_mode: str = "xyzrgb",
+        polar_feature_normalization: str = "raw",
         polar_dense_dirname: str | None = None,
         polar_dense_frames_dir: str | None = None,
+        vlm_image_mode: str = "rgb",
         point_pixel_dirname: str | None = None,
         material_profiles_file: str | None = None,
         material_candidate_names: list[str] | None = None,
@@ -99,20 +109,36 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         self.points_workspace = points_workspace
         self.max_npoints = max_npoints
         self.augment_pc_rot = augment_pc_rot
-        if point_feature_mode not in ("xyzrgb", "xyzrgb_polar"):
+        self.augment_point_color = augment_point_color
+        if point_feature_mode not in ("xyzrgb", "xyz_polar", "xyzrgb_polar"):
             raise ValueError(f"Unsupported point_feature_mode={point_feature_mode!r}")
         self.point_feature_mode = point_feature_mode
-        enabled = any((polar_dense_dirname, polar_dense_frames_dir, point_pixel_dirname, material_profiles_file))
-        if enabled and not (point_pixel_dirname and material_profiles_file and
-                            bool(polar_dense_dirname) != bool(polar_dense_frames_dir)):
+        if polar_feature_normalization not in ("raw", "rgb"):
+            raise ValueError(
+                "Unsupported polar_feature_normalization="
+                f"{polar_feature_normalization!r}; expected 'raw' or 'rgb'"
+            )
+        self.polar_feature_normalization = polar_feature_normalization
+        if vlm_image_mode not in ("rgb", "polar"):
+            raise ValueError(f"Unsupported vlm_image_mode={vlm_image_mode!r}; expected 'rgb' or 'polar'")
+        self.vlm_image_mode = vlm_image_mode
+        has_dense_polar = bool(polar_dense_dirname) != bool(polar_dense_frames_dir)
+        if polar_dense_dirname and polar_dense_frames_dir:
+            raise ValueError("Configure only one dense polar source")
+        material_requested = bool(point_pixel_dirname or material_profiles_file or material_candidate_names)
+        if material_requested and not (point_pixel_dirname and material_profiles_file and has_dense_polar):
             raise ValueError("Material conditioning requires point pixels, material profiles, and one dense polar source")
-        self.use_polar_material_conditioning = enabled
+        if vlm_image_mode == "polar" and not has_dense_polar:
+            raise ValueError("Polar VLM image mode requires one dense polar source")
+        if has_dense_polar and vlm_image_mode != "polar" and not material_requested:
+            raise ValueError("A dense polar source requires polar VLM image mode or material conditioning")
+        self.use_polar_material_conditioning = material_requested
         self.polar_dense_dir = self._resolve_sidecar_path(polar_dense_dirname) if polar_dense_dirname else None
         self.polar_dense_frames_dir = self._resolve_sidecar_path(polar_dense_frames_dir) if polar_dense_frames_dir else None
         self.point_pixel_dir = self._resolve_sidecar_path(point_pixel_dirname) if point_pixel_dirname else None
         self.material_candidates = (torch.from_numpy(load_material_candidates(
             self._resolve_sidecar_path(material_profiles_file), material_candidate_names
-        )) if enabled else None)
+        )) if material_requested else None)
         self.target_reconstruction_dir = (
             self._resolve_sidecar_path(target_reconstruction_dirname)
             if target_reconstruction_dirname else None
@@ -239,6 +265,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         item, query_indices = self.query_action_chunk(item, idx, ep_idx, delta_indices)
         item = self.add_video_frames(item, ep_idx, query_indices)
+        dense_polar = None
         if self.use_polar_material_conditioning:
             rgb_key = self.select_video_keys[0]
             if rgb_key not in item:
@@ -252,11 +279,19 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             if rgb.max() > 1:
                 rgb = rgb / 255.0
             item["material_rgb"] = rgb.contiguous()
-            item["polar_dense"] = torch.from_numpy(self._load_dense_polar(ep_idx, frame_idx))
+            dense_polar = self._load_dense_polar(ep_idx, frame_idx)
+            item["polar_dense"] = torch.from_numpy(dense_polar)
             if item["material_rgb"].shape != (3, *item["polar_dense"].shape[-2:]):
                 raise ValueError("Dense RGB/polar image sizes differ; pixel coordinates would be misaligned")
             item["material_candidates"] = self.material_candidates
-        self.apply_image_transforms(item, self.select_video_keys_for_vlm)
+        if self.vlm_image_mode == "polar":
+            if len(self.select_video_keys_for_vlm) != 1:
+                raise ValueError("Polar VLM image mode requires exactly one selected VLM image key")
+            if dense_polar is None:
+                dense_polar = self._load_dense_polar(ep_idx, frame_idx)
+            item[self.select_video_keys_for_vlm[0]] = polar_vlm_image(dense_polar)
+        else:
+            self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
         if self.target_reconstruction_dir is not None:
@@ -318,6 +353,13 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 raise ValueError(f"Polar point cloud '{point_key}' has DoLP outside [0, 1]")
             if np.any(np.abs(point_cloud[:, 7:9]) > 1.001):
                 raise ValueError(f"Polar point cloud '{point_key}' has invalid AoLP channels")
+            if self.point_feature_mode == "xyz_polar":
+                # Reuse the exact same points from the filled9 archive while
+                # replacing per-point RGB with its aligned polarization tuple.
+                point_cloud = np.ascontiguousarray(
+                    np.column_stack((point_cloud[:, :3], point_cloud[:, 6:9])),
+                    dtype=np.float32,
+                )
         return point_cloud
 
     def filter_point_cloud_by_workspace(self, point_cloud: np.ndarray):
@@ -360,14 +402,30 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]
 
-        point_cloud_color = augment_point_cloud_color(
-            point_cloud[:, 3:6],
-            brightness=0.2,
-            contrast=0.2,
-            saturation=0.2,
-            jitter_std=0.02,
-        )
-        point_cloud[:, 3:6] = point_cloud_color * 2 - 1
+        if self.point_feature_mode in ("xyzrgb", "xyzrgb_polar"):
+            point_cloud_color = point_cloud[:, 3:6]
+            if self.augment_point_color:
+                # Color augmentation is modality-specific. Preserve NumPy's
+                # sampling RNG state so enabling RGB augmentation cannot alter
+                # the point subsets selected for later examples in an ablation.
+                rng_state = np.random.get_state()
+                try:
+                    point_cloud_color = augment_point_cloud_color(
+                        point_cloud_color,
+                        brightness=0.2,
+                        contrast=0.2,
+                        saturation=0.2,
+                        jitter_std=0.02,
+                    )
+                finally:
+                    np.random.set_state(rng_state)
+            point_cloud[:, 3:6] = point_cloud_color * 2 - 1
+
+        if self.polar_feature_normalization == "rgb":
+            polar_slice = slice(3, 6) if self.point_feature_mode == "xyz_polar" else slice(6, 9)
+            point_cloud[:, polar_slice] = normalize_polar_like_rgb(
+                point_cloud[:, polar_slice]
+            )
 
         if self.augment_pc_rot != 0:
             angle = np.random.uniform(-1, 1) * np.deg2rad(self.augment_pc_rot)

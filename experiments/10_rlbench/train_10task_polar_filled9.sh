@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ten-task filled polar PointACT classifier training.
-# Keep the filled9 dataset and nine-channel point stem; material conditioning is off.
+# The default uses XYZRGB+polar; wrappers may select another filled9 feature view.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -56,6 +56,8 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --max-steps "${MAX_STEPS:--1}" \
     --per-device-train-batch-size "${PER_DEVICE_BATCH_SIZE:-512}" \
     --gradient-accumulation-steps 1 \
+    --seed "${TRAIN_SEED:-42}" \
+    --data_seed "${DATA_SEED:-42}" \
     --learning-rate "${LEARNING_RATE:-1e-4}" \
     --merger-lr "${MERGER_LR:-1e-4}" \
     --vision-lr "${VISION_LR:-4e-5}" \
@@ -69,8 +71,8 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --logging-steps "${LOGGING_STEPS:-3}" \
     --report-to "${REPORT_TO:-tensorboard}" \
     --attn-implementation flash_attention_2 \
-    --color_aug True \
-    --image_aug True \
+    --color_aug "${COLOR_AUG:-False}" \
+    --image_aug "${IMAGE_AUG:-False}" \
     --max_grad_norm 3 \
     --use_robot_state True \
     --ctx_embed_size 512 \
@@ -80,7 +82,8 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_enc_channels 64 128 256 512 768 \
     --ptv3_enc_depths 3 3 3 12 3 \
     --ptv3_enc_num_head 4 8 16 32 48 \
-    --ptv3_input_channels 9 \
+    --ptv3_input_channels "${PTV3_INPUT_CHANNELS:-9}" \
+    --ptv3_init_copy_input_channels "${PTV3_INIT_COPY_INPUT_CHANNELS:-6}" \
     --ptv3_clf_head_pos_bins 100 \
     --action_head_pos_center moe \
     --ptv3_apply_point_ca "${PTV3_APPLY_POINT_CA:-False}" \

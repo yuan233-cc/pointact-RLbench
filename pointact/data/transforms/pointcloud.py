@@ -3,6 +3,21 @@ import torch
 from scipy.spatial.transform import Rotation
 
 
+def normalize_polar_like_rgb(polar: np.ndarray) -> np.ndarray:
+    """Map [DoLP, cos(2AoLP), sin(2AoLP)] through an RGB-like [0, 1] interface.
+
+    DoLP is already in [0, 1]. The two axial-angle components are first mapped
+    from [-1, 1] to [0, 1]. Applying the usual RGB ``2*x-1`` transform then
+    produces [2*DoLP-1, cos(2AoLP), sin(2AoLP)] without color augmentation.
+    """
+    polar = np.asarray(polar)
+    if polar.shape[-1] != 3:
+        raise ValueError(f"Expected three polarization features, got shape {polar.shape}")
+    polar_01 = polar.copy()
+    polar_01[..., 1:3] = (polar_01[..., 1:3] + 1.0) * 0.5
+    return polar_01 * 2.0 - 1.0
+
+
 def augment_point_cloud_color(
     c,
     brightness=0.2,

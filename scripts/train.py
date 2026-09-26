@@ -5,6 +5,7 @@ from accelerate.logging import get_logger
 
 from pointact.model.backbone.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from pointact.train.pipeline_config import TrainPipelineConfig
+from pointact.train.ptv3_init import adapt_ptv3_input_stem
 from pointact.train.script_utils import (
     has_resume_checkpoint,
     log_trainable_parameters,
@@ -122,29 +123,21 @@ def maybe_load_ptv3_checkpoint(model, training_args: TrainPipelineConfig) -> Non
         )
         return
     
-    def _maybe_slice_input_stem(state_dict: dict[str, torch.Tensor], target_state: dict[str, torch.Tensor]) -> None:
-        key = "embedding.stem.linear.weight"
-        if key not in state_dict or key not in target_state:
-            return
-
-        source = state_dict[key]
-        target = target_state[key]
-        if source.shape == target.shape:
-            return
-        if source.ndim == target.ndim == 2 and source.shape[0] == target.shape[0] and source.shape[1] >= target.shape[1]:
-            state_dict[key] = source[:, : target.shape[1]]
-        elif source.ndim == target.ndim == 2 and source.shape[0] == target.shape[0] and source.shape[1] < target.shape[1]:
-            # Preserve a pretrained 6-channel stem when adding polar channels.
-            # Zero-initialized new weights keep the original model output at step 0
-            # and remain trainable through subsequent optimizer updates.
-            expanded = target.new_zeros(target.shape)
-            expanded[:, : source.shape[1]] = source
-            state_dict[key] = expanded
-
     checkpoint = torch.load(training_args.ptv3_init_ckpt_file, map_location="cpu")
     state_dict = checkpoint.get("state_dict", checkpoint)
     target_state = ptv3_module.state_dict()
-    _maybe_slice_input_stem(state_dict, target_state)
+    stem_adaptation = adapt_ptv3_input_stem(
+        state_dict,
+        target_state,
+        copy_input_channels=training_args.ptv3_init_copy_input_channels,
+    )
+    if stem_adaptation is not None:
+        copied_channels, zeroed_channels = stem_adaptation
+        logger.info(
+            f"initialized PTv3 input stem with {copied_channels} copied channels and "
+            f"{zeroed_channels} zero-initialized channels",
+            main_process_only=True,
+        )
 
     compatible_state = {}
     skipped_shape = []

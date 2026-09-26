@@ -62,6 +62,15 @@ class TrainPipelineConfig(TrainingArguments):
     target_reconstruction_max_points: int = field(default=256)
     # initialize the point cloud transformer v3
     ptv3_init_ckpt_file: str = field(default=None)
+    ptv3_init_copy_input_channels: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Copy only this many leading PTv3 input-stem channels from the initialization "
+                "checkpoint and zero-initialize all remaining target channels."
+            )
+        },
+    )
 
     ptv3_clf_head_pos_bins: int = field(default=100)
     regression_head_heatmap_temp: float = field(default=0.1)
