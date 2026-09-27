@@ -84,7 +84,7 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --attn-implementation flash_attention_2 \
     --log_level info \
     --report-to "${REPORT_TO:-tensorboard}" \
-    --color_aug True \
+    --color_aug "${COLOR_AUG:-True}" \
     --max_grad_norm 3 \
     --use_robot_state True \
     --ctx_embed_size 512 \
