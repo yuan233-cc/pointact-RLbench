@@ -1,0 +1,265 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1840" viewBox="0 0 2400 1840" role="img" aria-labelledby="title desc">
+<title id="title">PPFT features lifted to point-aligned polar tokens in PTv3</title>
+<desc id="desc">Dense RGB-D and polar fused PPFT features are sampled at saved point pixel coordinates to initialize one polar token per point. Shared serialization and padding produce local point and polar patches with identical support. Full joint attention mixes global action tokens with local polar and point tokens. Point and polar outputs are both inverse scattered to point indices; only action outputs are averaged across patches. Point and polar stage pooling share cluster IDs and unpool inverses.</desc>
+<rect width="2400" height="1840" fill="#ffffff"/>
+<text x="60" y="70" font-family="DejaVu Sans, Arial, sans-serif" font-size="41" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="60" dy="0">PPFT + PTv3: polar patches aligned to point patches</tspan>
+</text>
+<text x="62" y="116" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="62" dy="0">Proposed architecture · one polar feature per point · exact shared 3D patch support</tspan>
+</text>
+<rect x="50" y="153" width="2300" height="550" rx="18" fill="#fafbfd" stroke="#d4deeb" stroke-width="2"/>
+<text x="78" y="197" font-family="DejaVu Sans, Arial, sans-serif" font-size="29" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="78" dy="0">1  Lift PPFT image features to point-indexed polar tokens</tspan>
+</text>
+<rect x="80" y="235" width="340" height="80" rx="10" fill="#f1f5fb" stroke="#afc0d8" stroke-width="2"/>
+<text x="104" y="271" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="104" dy="0">RGB image</tspan>
+</text>
+<text x="104" y="298" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="104" dy="0">Observed / sparse depth</tspan>
+</text>
+<rect x="80" y="337" width="340" height="158" rx="10" fill="#f4ebfc" stroke="#c5aadd" stroke-width="2"/>
+<text x="103" y="373" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="103" dy="0">Polar input adapter</tspan>
+</text>
+<text x="103" y="410" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="103" dy="0">7 channels: I, DoLP,</tspan>
+<tspan x="103" dy="31">cos 2a, sin 2a, view ray XYZ</tspan>
+</text>
+<text x="103" y="476" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="103" dy="0">Match PPFT input conventions</tspan>
+</text>
+<rect x="475" y="261" width="370" height="212" rx="14" fill="#f0edf9" stroke="#aaa0ce" stroke-width="2"/>
+<text x="501" y="305" font-family="DejaVu Sans, Arial, sans-serif" font-size="29" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="501" dy="0">PPFT encoder</tspan>
+</text>
+<text x="501" y="349" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#17263e" font-weight="400" text-anchor="start">
+<tspan x="501" dy="0">CompletionFormer + PPFB</tspan>
+<tspan x="501" dy="35">RGB-D and polar fusion</tspan>
+</text>
+<text x="501" y="442" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="501" dy="0">Dense multiscale outputs</tspan>
+</text>
+<path d="M 420,275 L 450,275 L 450,310 L 466,310" fill="none" stroke="#526278" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="466,310 454.0,315.0 454.0,305.0" fill="#526278"/>
+<path d="M 420,412 L 466,412" fill="none" stroke="#7846a8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="466,412 454.0,417.0 454.0,407.0" fill="#7846a8"/>
+<rect x="900" y="278" width="300" height="179" rx="14" fill="#f6effd" stroke="#c5aadd" stroke-width="2"/>
+<text x="925" y="317" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="925" dy="0">Dense image features</tspan>
+</text>
+<text x="925" y="357" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="925" dy="0">Polar-conditioned features</tspan>
+<tspan x="925" dy="31">(RGB-D + polar)</tspan>
+<tspan x="925" dy="31">Multiscale feature maps</tspan>
+</text>
+<path d="M 845,368 L 890,368" fill="none" stroke="#7846a8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="890,368 878.0,373.0 878.0,363.0" fill="#7846a8"/>
+<rect x="1255" y="243" width="505" height="257" rx="14" fill="#f6effd" stroke="#c5aadd" stroke-width="2"/>
+<text x="1281" y="282" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="1281" dy="0">Point-to-pixel feature sampling</tspan>
+</text>
+<text x="1281" y="326" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#17263e" font-weight="400" text-anchor="start">
+<tspan x="1281" dy="0">Use saved point_pixel_indices</tspan>
+<tspan x="1281" dy="35">Sample each scale at pixel (u_i, v_i)</tspan>
+<tspan x="1281" dy="35">Concatenate / fuse sampled features</tspan>
+<tspan x="1281" dy="35">Linear projection → C0 = 64</tspan>
+</text>
+<path d="M 1200,368 L 1245,368" fill="none" stroke="#7846a8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="1245,368 1233.0,373.0 1233.0,363.0" fill="#7846a8"/>
+<rect x="1825" y="234" width="490" height="391" rx="14" fill="#ffffff" stroke="#b6c4d5" stroke-width="2"/>
+<text x="1850" y="274" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="1850" dy="0">Aligned point-indexed arrays</tspan>
+</text>
+<rect x="1850" y="301" width="438" height="92" rx="10" fill="#f2e9fc" stroke="#b997d4" stroke-width="2"/>
+<text x="1874" y="340" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="1874" dy="0">Z0: [sum N, 64]</tspan>
+</text>
+<text x="1874" y="374" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#7846a8" font-weight="400" text-anchor="start">
+<tspan x="1874" dy="0">One polar-conditioned token per point</tspan>
+</text>
+<text x="2070" y="444" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#17263e" font-weight="700" text-anchor="middle">
+<tspan x="2070" dy="0">SAME point i ↔ pixel (u_i, v_i)</tspan>
+</text>
+<rect x="1850" y="485" width="438" height="92" rx="10" fill="#eaf3fc" stroke="#9fbedc" stroke-width="2"/>
+<text x="1874" y="525" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#1e65a6" font-weight="700" text-anchor="start">
+<tspan x="1874" dy="0">P0: [sum N, 64]</tspan>
+</text>
+<text x="1874" y="558" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#1e65a6" font-weight="400" text-anchor="start">
+<tspan x="1874" dy="0">One geometric feature per point</tspan>
+</text>
+<path d="M 1760,347 L 1840,347" fill="none" stroke="#7846a8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="1840,347 1828.0,352.0 1828.0,342.0" fill="#7846a8"/>
+<rect x="80" y="541" width="365" height="105" rx="10" fill="#eaf3fc" stroke="#9fbedc" stroke-width="2"/>
+<text x="103" y="580" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#1e65a6" font-weight="700" text-anchor="start">
+<tspan x="103" dy="0">Point cloud</tspan>
+</text>
+<text x="103" y="616" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="103" dy="0">XYZ + existing point input features</tspan>
+</text>
+<rect x="500" y="541" width="350" height="105" rx="10" fill="#eaf3fc" stroke="#9fbedc" stroke-width="2"/>
+<text x="525" y="581" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#1e65a6" font-weight="700" text-anchor="start">
+<tspan x="525" dy="0">Existing point embedding</tspan>
+</text>
+<text x="525" y="616" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="525" dy="0">Keep the retained point order</tspan>
+</text>
+<path d="M 445,594 L 490,594" fill="none" stroke="#1e65a6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="490,594 478.0,599.0 478.0,589.0" fill="#1e65a6"/>
+<path d="M 850,594 L 1760,594 L 1760,531 L 1840,531" fill="none" stroke="#1e65a6" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="1840,531 1828.0,536.0 1828.0,526.0" fill="#1e65a6"/>
+<text x="944" y="564" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="944" dy="0">Carry point_pixel_indices through filtering and point sampling.</tspan>
+</text>
+<text x="78" y="679" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="78" dy="0">Pixel coordinates must follow the same image transforms, camera crop and point filtering used by the model.</tspan>
+</text>
+<rect x="50" y="746" width="2300" height="653" rx="18" fill="#fafbfd" stroke="#d4deeb" stroke-width="2"/>
+<text x="79" y="791" font-family="DejaVu Sans, Arial, sans-serif" font-size="29" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="79" dy="0">2  Every PTv3 block gathers matching local P / Z patches</tspan>
+</text>
+<rect x="80" y="834" width="365" height="232" rx="14" fill="#f0f4fb" stroke="#aec0d9" stroke-width="2"/>
+<text x="105" y="876" font-family="DejaVu Sans, Arial, sans-serif" font-size="27" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="105" dy="0">Current P and Z</tspan>
+</text>
+<text x="105" y="920" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="105" dy="0">Same point-index domain</tspan>
+<tspan x="105" dy="35">Independent feature states</tspan>
+</text>
+<text x="105" y="1029" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="105" dy="0">P[i] and Z[i] stay aligned</tspan>
+</text>
+<rect x="80" y="1102" width="365" height="214" rx="14" fill="#fff3e1" stroke="#ddbf91" stroke-width="2"/>
+<text x="105" y="1143" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#a56413" font-weight="700" text-anchor="start">
+<tspan x="105" dy="0">Global A tokens</tspan>
+</text>
+<text x="105" y="1186" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#17263e" font-weight="400" text-anchor="start">
+<tspan x="105" dy="0">State encoder + learned query</tspan>
+<tspan x="105" dy="34">Broadcast to every patch</tspan>
+<tspan x="105" dy="34">Ta = 2 for chunk = 1</tspan>
+</text>
+<rect x="505" y="834" width="425" height="262" rx="14" fill="#f5f0fb" stroke="#c0afd6" stroke-width="2"/>
+<text x="531" y="876" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="531" dy="0">ONE shared patch index set Ij</tspan>
+</text>
+<text x="531" y="917" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="531" dy="0">Same serialized_order</tspan>
+<tspan x="531" dy="34">Same padding / unpadding</tspan>
+</text>
+<text x="531" y="1006" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#1e65a6" font-weight="700" text-anchor="start">
+<tspan x="531" dy="0">Pj = P[Ij]      [K, C]</tspan>
+</text>
+<text x="531" y="1054" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="531" dy="0">Zj = Z[Ij]      [K, C]</tspan>
+</text>
+<path d="M 445,951 L 495,951" fill="none" stroke="#526278" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="495,951 483.0,956.0 483.0,946.0" fill="#526278"/>
+<rect x="985" y="878" width="324" height="206" rx="14" fill="#ffffff" stroke="#acbad0" stroke-width="2"/>
+<text x="1009" y="919" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="1009" dy="0">Concatenate</tspan>
+</text>
+<text x="1147" y="971" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" fill="#17263e" font-weight="700" text-anchor="middle">
+<tspan x="1147" dy="0">[A, Zj, Pj]</tspan>
+</text>
+<text x="1147" y="1043" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#526278" font-weight="400" text-anchor="middle">
+<tspan x="1147" dy="0">[Ta + 2K, C]</tspan>
+</text>
+<path d="M 930,979 L 975,979" fill="none" stroke="#526278" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="975,979 963.0,984.0 963.0,974.0" fill="#526278"/>
+<path d="M 445,1218 L 475,1218 L 475,1112 L 960,1112 L 960,1043 L 975,1043" fill="none" stroke="#a56413" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="975,1043 963.0,1048.0 963.0,1038.0" fill="#a56413"/>
+<rect x="1364" y="878" width="389" height="206" rx="14" fill="#eaf0fb" stroke="#99afd0" stroke-width="2"/>
+<text x="1558" y="920" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#17263e" font-weight="700" text-anchor="middle">
+<tspan x="1558" dy="0">Joint self-attention</tspan>
+</text>
+<text x="1558" y="973" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#17263e" font-weight="700" text-anchor="middle">
+<tspan x="1558" dy="0">P ↔ A · A ↔ Z · Z ↔ P</tspan>
+</text>
+<text x="1558" y="1032" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#526278" font-weight="400" text-anchor="middle">
+<tspan x="1558" dy="0">Full noncausal attention</tspan>
+<tspan x="1558" dy="29">within the SAME local 3D support</tspan>
+</text>
+<path d="M 1309,979 L 1354,979" fill="none" stroke="#526278" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="1354,979 1342.0,984.0 1342.0,974.0" fill="#526278"/>
+<rect x="1808" y="834" width="508" height="450" rx="14" fill="#ffffff" stroke="#afbdd0" stroke-width="2"/>
+<text x="1834" y="875" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="1834" dy="0">Split outputs and restore indices</tspan>
+</text>
+<rect x="1834" y="901" width="455" height="95" rx="10" fill="#eaf3fc" stroke="#a6c3e0" stroke-width="2"/>
+<text x="1855" y="939" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#1e65a6" font-weight="700" text-anchor="start">
+<tspan x="1855" dy="0">Pj output → inverse scatter → P[i]</tspan>
+</text>
+<text x="1855" y="974" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="1855" dy="0">Restore original point indices</tspan>
+</text>
+<rect x="1834" y="1016" width="455" height="95" rx="10" fill="#f4ebfc" stroke="#c3a6dd" stroke-width="2"/>
+<text x="1855" y="1054" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#7846a8" font-weight="700" text-anchor="start">
+<tspan x="1855" dy="0">Zj output → inverse scatter → Z[i]</tspan>
+</text>
+<text x="1855" y="1089" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="1855" dy="0">Restore the SAME point indices</tspan>
+</text>
+<rect x="1834" y="1130" width="455" height="94" rx="10" fill="#fff3e1" stroke="#ddbf91" stroke-width="2"/>
+<text x="1855" y="1167" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#a56413" font-weight="700" text-anchor="start">
+<tspan x="1855" dy="0">Aj output → mean over patches</tspan>
+</text>
+<text x="1855" y="1202" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="1855" dy="0">Aggregate only within each sample</tspan>
+</text>
+<text x="1834" y="1260" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="1834" dy="0">Only A is averaged; Z stays point-indexed.</tspan>
+</text>
+<path d="M 1753,979 L 1798,979" fill="none" stroke="#526278" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="1798,979 1786.0,984.0 1786.0,974.0" fill="#526278"/>
+<rect x="505" y="1127" width="1248" height="63" rx="10" fill="#f5f7fb" stroke="#c5cfdc" stroke-width="2"/>
+<text x="528" y="1167" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="528" dy="0">Point geometry only: CPE / spatial serialization operate on P; Z follows exactly the same indices.</tspan>
+</text>
+<rect x="505" y="1251" width="1248" height="78" rx="10" fill="#eef7f3" stroke="#acd0c0" stroke-width="2"/>
+<text x="530" y="1283" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#17263e" font-weight="400" text-anchor="start">
+<tspan x="530" dy="0">Per-stream residual / normalization / FFN updates follow attention.</tspan>
+</text>
+<text x="530" y="1314" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#267f66" font-weight="400" text-anchor="start">
+<tspan x="530" dy="0">Optional language cross-attention: Q = P, A, Z; K/V = language context (read-only here).</tspan>
+</text>
+<text x="80" y="1371" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="80" dy="0">Next block may change serialization order: gather both P and Z again from their point-indexed states.</tspan>
+</text>
+<rect x="50" y="1445" width="745" height="248" rx="14" fill="#f8fafc" stroke="#d4deeb" stroke-width="2"/>
+<text x="75" y="1488" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="75" dy="0">Stage transitions preserve alignment</tspan>
+</text>
+<text x="75" y="1534" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="75" dy="0">Pool P and Z with the SAME cluster IDs.</tspan>
+<tspan x="75" dy="38">Unpool with the SAME inverse map.</tspan>
+<tspan x="75" dy="38">Use separate feature projections for P and Z.</tspan>
+<tspan x="75" dy="38">Project A channels; keep global action tokens.</tspan>
+</text>
+<rect x="825" y="1445" width="630" height="248" rx="14" fill="#f8fafc" stroke="#d4deeb" stroke-width="2"/>
+<text x="850" y="1488" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="850" dy="0">Existing action readout</tspan>
+</text>
+<text x="850" y="1534" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="850" dy="0">Final P + final A → action head</tspan>
+<tspan x="850" dy="38">Position / rotation / gripper</tspan>
+<tspan x="850" dy="38">Z affects P and A through joint attention.</tspan>
+<tspan x="850" dy="38">No separate polar prediction head required.</tspan>
+</text>
+<rect x="1485" y="1445" width="865" height="248" rx="14" fill="#fffaf0" stroke="#e1c995" stroke-width="2"/>
+<text x="1510" y="1488" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#a56413" font-weight="700" text-anchor="start">
+<tspan x="1510" dy="0">Compute budget and later compression</tspan>
+</text>
+<text x="1510" y="1534" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="1510" dy="0">K = 1024, Ta = 2 → 2050 attention tokens / patch.</tspan>
+<tspan x="1510" dy="38">About 4× attention pairs vs. 1026-token P + A baseline.</tspan>
+<tspan x="1510" dy="38">Optional M = 16 / 32 local polar compression must</tspan>
+<tspan x="1510" dy="38">write back to per-point Z before the next serialization.</tspan>
+</text>
+<text x="62" y="1751" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#17263e" font-weight="700" text-anchor="start">
+<tspan x="62" dy="0">2D rectangular image patches ≠ 3D serialized patches.</tspan>
+</text>
+<text x="62" y="1794" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#526278" font-weight="400" text-anchor="start">
+<tspan x="62" dy="0">Exact support is defined by point indices and their source pixels. PPFT features may have a broader image receptive field.</tspan>
+</text>
+</svg>

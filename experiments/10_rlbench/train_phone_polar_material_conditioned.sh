@@ -53,6 +53,7 @@ accelerate launch --num_processes 1 --num_machines 1 scripts/train.py \
     --ptv3_enc_depths 3 3 3 12 3 \
     --ptv3_enc_num_head 4 8 16 32 48 \
     --ptv3_input_channels 9 \
+    --ptv3_init_copy_input_channels 6 \
     --ptv3_clf_head_pos_bins 100 \
     --action_head_pos_center moe \
     --ptv3_apply_point_ca False \

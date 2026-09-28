@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export DATA_PATH="${DATA_PATH:-experiments/10_rlbench/data_configs/data-10task-polar-filled9-target-reconstruction.yaml}"
 export OUTPUT_DIR="${OUTPUT_DIR:-$repo_root/checkpoints/rlbench/pointact-rlbench-polar-filled9-target-reconstruction-bs128}"
+export PTV3_INPUT_CHANNELS=9
+export PTV3_INIT_COPY_INPUT_CHANNELS=6
 export USE_TARGET_RECONSTRUCTION=True
 export PTV3_APPLY_POINT_CA=True
 export TARGET_RECONSTRUCTION_WEIGHT="${TARGET_RECONSTRUCTION_WEIGHT:-2.5}"

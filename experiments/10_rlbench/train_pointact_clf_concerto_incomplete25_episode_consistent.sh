@@ -6,7 +6,7 @@ export HF_DATASETS_OFFLINE=1
 export PYTHONPATH=$(pwd):$PYTHONPATH
 
 GPUS=1
-PER_DEVICE_BATCH_SIZE=128 #64
+PER_DEVICE_BATCH_SIZE=512
 
 # Build accelerate arguments based on GPU count
 if [ $GPUS -eq 1 ]; then
@@ -25,9 +25,9 @@ dataset=experiments/10_rlbench/data_configs/data-hybridvla-point-clf-frontview-i
 dataset_name=keysteps-euler-points.frontview-no.image-aug.30-incomplete25-episode-consistent
 
 # hparams: intentionally identical to train_pointact_clf_concerto.sh
-lr=5e-5
-mlr=5e-5
-vlr=2e-5
+lr=1e-4
+mlr=1e-4
+vlr=4e-5
 
 chunk_size=1
 epoch=1000 #3000
@@ -66,16 +66,17 @@ accelerate launch $ACCELERATE_ARGS scripts/train.py \
     --fp16 False \
     --num-train-epochs ${epoch} \
     --per-device-train-batch-size ${PER_DEVICE_BATCH_SIZE} \
+    --gradient-accumulation-steps 1 \
     --learning-rate ${lr} \
     --merger-lr ${mlr} \
     --vision-lr ${vlr} \
     --weight-decay 0.001 \
     --warmup-steps 0.03 \
     --lr-scheduler-type cosine \
-    --gradient-checkpointing True \
+    --gradient-checkpointing False \
     --save-strategy steps \
-    --logging-steps 10 \
-    --save-steps 2000 \
+    --logging-steps 3 \
+    --save-steps 500 \
     --save-total-limit 10 \
     --run-name ${run_name} \
     --attn-implementation flash_attention_2 \

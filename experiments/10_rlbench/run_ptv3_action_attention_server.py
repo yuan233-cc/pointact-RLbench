@@ -24,12 +24,17 @@ class Args:
     save_dir: str = ""
     capture_dir: str = "ptv3_action_attention_captures"
     max_captures: int = 1
+    capture_first_requests_per_episode: int = 0
+    capture_request_indices_per_episode: tuple[int, ...] = ()
 
 
 class AttentionPolicy(Policy):
     def __init__(self, args: Args):
         super().__init__(args)
+        self.attention_args = args
         self._latest_scene_center = None
+        self._capture_episode_id: int | None = None
+        self._capture_request_in_episode = 0
         original_center = self.processor._center_point_cloud_and_state
 
         def record_scene_center(*center_args, **center_kwargs):
@@ -85,7 +90,28 @@ class AttentionPolicy(Policy):
 
     def get_action(self, batch, options):
         self.capture.begin_request(batch)
+        self.capture.metadata.update(
+            {
+                "episode_id": self._capture_episode_id,
+                "request_in_episode": self._capture_request_in_episode,
+            }
+        )
+        limit = self.attention_args.capture_first_requests_per_episode
+        selected = self.attention_args.capture_request_indices_per_episode
+        if selected and self._capture_request_in_episode not in selected:
+            self.capture.request_capture_enabled = False
+        elif limit > 0 and self._capture_request_in_episode >= limit:
+            self.capture.request_capture_enabled = False
+        self._capture_request_in_episode += 1
         return super().get_action(batch, options)
+
+    def reset(self, options=None):
+        options = options or {}
+        self._capture_episode_id = (
+            int(options["episode_id"]) if "episode_id" in options else None
+        )
+        self._capture_request_in_episode = 0
+        return super().reset(options=options)
 
 
 def main(args: Args) -> None:

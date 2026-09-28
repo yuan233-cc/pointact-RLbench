@@ -79,6 +79,20 @@ class ActionAttentionCapture(FeatureCapture):
                 (num_heads, num_points), dtype=torch.float32,
                 device=point.feat.device,
             )
+            state_weight = (
+                torch.zeros(num_points, dtype=torch.float32, device=point.feat.device)
+                if skip_state_token
+                else None
+            )
+            state_per_head = (
+                torch.zeros(
+                    (num_heads, num_points),
+                    dtype=torch.float32,
+                    device=point.feat.device,
+                )
+                if skip_state_token
+                else None
+            )
             expected_action = torch.zeros_like(point.action_feat[0], dtype=torch.float32)
 
             qkv_chunks = torch.split(point_qkv, patch_lengths, dim=0)
@@ -103,6 +117,14 @@ class ActionAttentionCapture(FeatureCapture):
                 head_weight = point_probability.mean(dim=1) / num_patches
                 per_action.index_add_(1, index_chunk, action_weight)
                 per_head.index_add_(1, index_chunk, head_weight)
+                if state_weight is not None and state_per_head is not None:
+                    state_probability = probability[:, 0, num_tokens:]
+                    state_weight.index_add_(
+                        0, index_chunk, state_probability.mean(dim=0) / num_patches
+                    )
+                    state_per_head.index_add_(
+                        1, index_chunk, state_probability / num_patches
+                    )
 
                 all_action_probability = probability[:, :num_tokens]
                 action_value = torch.einsum(
@@ -126,6 +148,16 @@ class ActionAttentionCapture(FeatureCapture):
             self.pending_arrays[f"{prefix}_point_attention_mass"] = np.asarray(
                 float(mean_weight.sum().cpu()), dtype=np.float32
             )
+            if state_weight is not None and state_per_head is not None:
+                self.pending_arrays[f"{prefix}_state_point_weights"] = (
+                    state_weight.cpu().numpy()
+                )
+                self.pending_arrays[f"{prefix}_state_per_head_weights"] = (
+                    state_per_head.cpu().numpy()
+                )
+                self.pending_arrays[
+                    f"{prefix}_state_point_attention_mass"
+                ] = np.asarray(float(state_weight.sum().cpu()), dtype=np.float32)
             self.pending_arrays[f"{prefix}_num_action_queries"] = np.asarray(
                 num_actions, dtype=np.int64
             )

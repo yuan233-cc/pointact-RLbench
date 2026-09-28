@@ -1,0 +1,362 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2200" height="1530" viewBox="0 0 2200 1530" role="img" aria-labelledby="title desc">
+<title id="title">PTv3 with a persistent polar token stream</title>
+<desc id="desc">Proposed architecture: point, action and polar token streams interact through full joint patch self-attention in every Concerto block. Polar tokens are data-conditioned by a polar MLP and learned query resampler. Five backbone stages project channels while preserving action and polar token counts. Language conditions all streams. Existing action outputs use final point and action features.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#62728a"/></marker>
+<marker id="tiny" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#73829b"/></marker>
+</defs>
+<rect width="2200" height="1530" fill="#ffffff"/>
+<text x="60" y="72" font-family="DejaVu Sans, Arial, sans-serif" font-size="42" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="60" dy="0">PTv3 + a persistent polar token stream</tspan>
+</text>
+<text x="62" y="116" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="62" dy="0">Staged proposal · MVP: joint point / action / polar attention in every Concerto block</tspan>
+</text>
+<rect x="60" y="175" width="430" height="165" rx="14" fill="#edf5fd" stroke="#9cbfdf" stroke-width="2"/>
+<text x="84" y="209" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#2167a9" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">POINT STREAM · existing input</tspan>
+</text>
+<text x="84" y="246" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="84" dy="0">XYZ + RGB + DoLP + cos 2AoLP</tspan>
+<tspan x="84" dy="29">+ sin 2AoLP  (filled9 features)</tspan>
+</text>
+<text x="84" y="315" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#2167a9" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">Point embedding → P0: [N, 64]</tspan>
+</text>
+<rect x="60" y="365" width="430" height="145" rx="14" fill="#fff5e6" stroke="#dec093" stroke-width="2"/>
+<text x="84" y="399" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#b36914" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">ACTION STREAM · existing path</tspan>
+</text>
+<text x="84" y="435" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="84" dy="0">State token + learned action query</tspan>
+</text>
+<text x="84" y="483" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#b36914" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">A0: [B, 2, 64]  (chunk = 1)</tspan>
+</text>
+<rect x="60" y="535" width="430" height="235" rx="14" fill="#f6effd" stroke="#c5aadf" stroke-width="2"/>
+<text x="84" y="570" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#7d49ab" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">POLAR STREAM · new path</tspan>
+</text>
+<text x="84" y="607" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="84" dy="0">XYZ + polar features + angle-valid</tspan>
+<tspan x="84" dy="33">Polar MLP + XYZ position encoding</tspan>
+<tspan x="84" dy="33">16 learned queries → resampler</tspan>
+</text>
+<text x="84" y="739" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#7d49ab" font-weight="700" text-anchor="start">
+<tspan x="84" dy="0">Z0: [B, 16, 64]  (data-conditioned)</tspan>
+</text>
+<rect x="550" y="175" width="1190" height="595" rx="18" fill="#f8fafc" stroke="#d4dce8" stroke-width="2"/>
+<text x="580" y="216" font-family="DejaVu Sans, Arial, sans-serif" font-size="27" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="580" dy="0">Concerto backbone</tspan>
+</text>
+<text x="580" y="250" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="580" dy="0">Three feature streams persist through all five stages</tspan>
+</text>
+<rect x="580" y="275" width="194" height="415" rx="12" fill="#ffffff" stroke="#d8e0eb" stroke-width="2"/>
+<text x="677" y="310" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="677" dy="0">Stage 1</tspan>
+</text>
+<text x="677" y="344" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="677" dy="0">C = 64 · 3 blocks</tspan>
+</text>
+<rect x="602" y="368" width="150" height="69" rx="10" fill="#e7f1fc" stroke="#2167a9" stroke-width="1.5"/>
+<text x="677" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#2167a9" font-weight="700" text-anchor="middle">
+<tspan x="677" dy="0">P</tspan>
+</text>
+<text x="677" y="423" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#2167a9" font-weight="400" text-anchor="middle">
+<tspan x="677" dy="0">point tokens</tspan>
+</text>
+<rect x="602" y="475" width="150" height="69" rx="10" fill="#fff1dc" stroke="#b36914" stroke-width="1.5"/>
+<text x="677" y="505" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#b36914" font-weight="700" text-anchor="middle">
+<tspan x="677" dy="0">A</tspan>
+</text>
+<text x="677" y="530" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#b36914" font-weight="400" text-anchor="middle">
+<tspan x="677" dy="0">2 tokens</tspan>
+</text>
+<rect x="602" y="582" width="150" height="69" rx="10" fill="#f1e6fc" stroke="#7d49ab" stroke-width="1.5"/>
+<text x="677" y="612" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7d49ab" font-weight="700" text-anchor="middle">
+<tspan x="677" dy="0">Z</tspan>
+</text>
+<text x="677" y="637" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="400" text-anchor="middle">
+<tspan x="677" dy="0">16 tokens</tspan>
+</text>
+<path d="M 677 444 L 677 468" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="677.0,468.0 673.92,461.0 680.08,461.0" fill="#62728a"/><polygon points="677.0,444.0 680.08,451.0 673.92,451.0" fill="#62728a"/>
+<path d="M 677 552 L 677 575" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="677.0,575.0 673.92,568.0 680.08,568.0" fill="#62728a"/><polygon points="677.0,552.0 680.08,559.0 673.92,559.0" fill="#62728a"/>
+<path d="M 754 403 L 834 403" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="834.0,403.0 824.0,407.4 824.0,398.6" fill="#62728a"/>
+<path d="M 754 510 L 834 510" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="834.0,510.0 824.0,514.4 824.0,505.6" fill="#62728a"/>
+<path d="M 754 617 L 834 617" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="834.0,617.0 824.0,621.4 824.0,612.6" fill="#62728a"/>
+<rect x="814" y="275" width="194" height="415" rx="12" fill="#ffffff" stroke="#d8e0eb" stroke-width="2"/>
+<text x="911" y="310" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="911" dy="0">Stage 2</tspan>
+</text>
+<text x="911" y="344" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="911" dy="0">C = 128 · 3 blocks</tspan>
+</text>
+<rect x="836" y="368" width="150" height="69" rx="10" fill="#e7f1fc" stroke="#2167a9" stroke-width="1.5"/>
+<text x="911" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#2167a9" font-weight="700" text-anchor="middle">
+<tspan x="911" dy="0">P</tspan>
+</text>
+<text x="911" y="423" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#2167a9" font-weight="400" text-anchor="middle">
+<tspan x="911" dy="0">point tokens</tspan>
+</text>
+<rect x="836" y="475" width="150" height="69" rx="10" fill="#fff1dc" stroke="#b36914" stroke-width="1.5"/>
+<text x="911" y="505" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#b36914" font-weight="700" text-anchor="middle">
+<tspan x="911" dy="0">A</tspan>
+</text>
+<text x="911" y="530" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#b36914" font-weight="400" text-anchor="middle">
+<tspan x="911" dy="0">2 tokens</tspan>
+</text>
+<rect x="836" y="582" width="150" height="69" rx="10" fill="#f1e6fc" stroke="#7d49ab" stroke-width="1.5"/>
+<text x="911" y="612" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7d49ab" font-weight="700" text-anchor="middle">
+<tspan x="911" dy="0">Z</tspan>
+</text>
+<text x="911" y="637" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="400" text-anchor="middle">
+<tspan x="911" dy="0">16 tokens</tspan>
+</text>
+<path d="M 911 444 L 911 468" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="911.0,468.0 907.92,461.0 914.08,461.0" fill="#62728a"/><polygon points="911.0,444.0 914.08,451.0 907.92,451.0" fill="#62728a"/>
+<path d="M 911 552 L 911 575" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="911.0,575.0 907.92,568.0 914.08,568.0" fill="#62728a"/><polygon points="911.0,552.0 914.08,559.0 907.92,559.0" fill="#62728a"/>
+<path d="M 988 403 L 1068 403" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1068.0,403.0 1058.0,407.4 1058.0,398.6" fill="#62728a"/>
+<path d="M 988 510 L 1068 510" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1068.0,510.0 1058.0,514.4 1058.0,505.6" fill="#62728a"/>
+<path d="M 988 617 L 1068 617" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1068.0,617.0 1058.0,621.4 1058.0,612.6" fill="#62728a"/>
+<rect x="1048" y="275" width="194" height="415" rx="12" fill="#ffffff" stroke="#d8e0eb" stroke-width="2"/>
+<text x="1145" y="310" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="1145" dy="0">Stage 3</tspan>
+</text>
+<text x="1145" y="344" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="1145" dy="0">C = 256 · 3 blocks</tspan>
+</text>
+<rect x="1070" y="368" width="150" height="69" rx="10" fill="#e7f1fc" stroke="#2167a9" stroke-width="1.5"/>
+<text x="1145" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#2167a9" font-weight="700" text-anchor="middle">
+<tspan x="1145" dy="0">P</tspan>
+</text>
+<text x="1145" y="423" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#2167a9" font-weight="400" text-anchor="middle">
+<tspan x="1145" dy="0">point tokens</tspan>
+</text>
+<rect x="1070" y="475" width="150" height="69" rx="10" fill="#fff1dc" stroke="#b36914" stroke-width="1.5"/>
+<text x="1145" y="505" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#b36914" font-weight="700" text-anchor="middle">
+<tspan x="1145" dy="0">A</tspan>
+</text>
+<text x="1145" y="530" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#b36914" font-weight="400" text-anchor="middle">
+<tspan x="1145" dy="0">2 tokens</tspan>
+</text>
+<rect x="1070" y="582" width="150" height="69" rx="10" fill="#f1e6fc" stroke="#7d49ab" stroke-width="1.5"/>
+<text x="1145" y="612" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7d49ab" font-weight="700" text-anchor="middle">
+<tspan x="1145" dy="0">Z</tspan>
+</text>
+<text x="1145" y="637" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="400" text-anchor="middle">
+<tspan x="1145" dy="0">16 tokens</tspan>
+</text>
+<path d="M 1145 444 L 1145 468" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1145.0,468.0 1141.92,461.0 1148.08,461.0" fill="#62728a"/><polygon points="1145.0,444.0 1148.08,451.0 1141.92,451.0" fill="#62728a"/>
+<path d="M 1145 552 L 1145 575" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1145.0,575.0 1141.92,568.0 1148.08,568.0" fill="#62728a"/><polygon points="1145.0,552.0 1148.08,559.0 1141.92,559.0" fill="#62728a"/>
+<path d="M 1222 403 L 1302 403" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1302.0,403.0 1292.0,407.4 1292.0,398.6" fill="#62728a"/>
+<path d="M 1222 510 L 1302 510" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1302.0,510.0 1292.0,514.4 1292.0,505.6" fill="#62728a"/>
+<path d="M 1222 617 L 1302 617" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1302.0,617.0 1292.0,621.4 1292.0,612.6" fill="#62728a"/>
+<rect x="1282" y="275" width="194" height="415" rx="12" fill="#ffffff" stroke="#d8e0eb" stroke-width="2"/>
+<text x="1379" y="310" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="1379" dy="0">Stage 4</tspan>
+</text>
+<text x="1379" y="344" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="1379" dy="0">C = 512 · 12 blocks</tspan>
+</text>
+<rect x="1304" y="368" width="150" height="69" rx="10" fill="#e7f1fc" stroke="#2167a9" stroke-width="1.5"/>
+<text x="1379" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#2167a9" font-weight="700" text-anchor="middle">
+<tspan x="1379" dy="0">P</tspan>
+</text>
+<text x="1379" y="423" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#2167a9" font-weight="400" text-anchor="middle">
+<tspan x="1379" dy="0">point tokens</tspan>
+</text>
+<rect x="1304" y="475" width="150" height="69" rx="10" fill="#fff1dc" stroke="#b36914" stroke-width="1.5"/>
+<text x="1379" y="505" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#b36914" font-weight="700" text-anchor="middle">
+<tspan x="1379" dy="0">A</tspan>
+</text>
+<text x="1379" y="530" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#b36914" font-weight="400" text-anchor="middle">
+<tspan x="1379" dy="0">2 tokens</tspan>
+</text>
+<rect x="1304" y="582" width="150" height="69" rx="10" fill="#f1e6fc" stroke="#7d49ab" stroke-width="1.5"/>
+<text x="1379" y="612" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7d49ab" font-weight="700" text-anchor="middle">
+<tspan x="1379" dy="0">Z</tspan>
+</text>
+<text x="1379" y="637" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="400" text-anchor="middle">
+<tspan x="1379" dy="0">16 tokens</tspan>
+</text>
+<path d="M 1379 444 L 1379 468" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1379.0,468.0 1375.92,461.0 1382.08,461.0" fill="#62728a"/><polygon points="1379.0,444.0 1382.08,451.0 1375.92,451.0" fill="#62728a"/>
+<path d="M 1379 552 L 1379 575" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1379.0,575.0 1375.92,568.0 1382.08,568.0" fill="#62728a"/><polygon points="1379.0,552.0 1382.08,559.0 1375.92,559.0" fill="#62728a"/>
+<path d="M 1456 403 L 1536 403" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1536.0,403.0 1526.0,407.4 1526.0,398.6" fill="#62728a"/>
+<path d="M 1456 510 L 1536 510" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1536.0,510.0 1526.0,514.4 1526.0,505.6" fill="#62728a"/>
+<path d="M 1456 617 L 1536 617" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1536.0,617.0 1526.0,621.4 1526.0,612.6" fill="#62728a"/>
+<rect x="1516" y="275" width="194" height="415" rx="12" fill="#ffffff" stroke="#d8e0eb" stroke-width="2"/>
+<text x="1613" y="310" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="1613" dy="0">Stage 5</tspan>
+</text>
+<text x="1613" y="344" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="1613" dy="0">C = 768 · 3 blocks</tspan>
+</text>
+<rect x="1538" y="368" width="150" height="69" rx="10" fill="#e7f1fc" stroke="#2167a9" stroke-width="1.5"/>
+<text x="1613" y="398" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#2167a9" font-weight="700" text-anchor="middle">
+<tspan x="1613" dy="0">P</tspan>
+</text>
+<text x="1613" y="423" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#2167a9" font-weight="400" text-anchor="middle">
+<tspan x="1613" dy="0">point tokens</tspan>
+</text>
+<rect x="1538" y="475" width="150" height="69" rx="10" fill="#fff1dc" stroke="#b36914" stroke-width="1.5"/>
+<text x="1613" y="505" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#b36914" font-weight="700" text-anchor="middle">
+<tspan x="1613" dy="0">A</tspan>
+</text>
+<text x="1613" y="530" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#b36914" font-weight="400" text-anchor="middle">
+<tspan x="1613" dy="0">2 tokens</tspan>
+</text>
+<rect x="1538" y="582" width="150" height="69" rx="10" fill="#f1e6fc" stroke="#7d49ab" stroke-width="1.5"/>
+<text x="1613" y="612" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#7d49ab" font-weight="700" text-anchor="middle">
+<tspan x="1613" dy="0">Z</tspan>
+</text>
+<text x="1613" y="637" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="400" text-anchor="middle">
+<tspan x="1613" dy="0">16 tokens</tspan>
+</text>
+<path d="M 1613 444 L 1613 468" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1613.0,468.0 1609.92,461.0 1616.08,461.0" fill="#62728a"/><polygon points="1613.0,444.0 1616.08,451.0 1609.92,451.0" fill="#62728a"/>
+<path d="M 1613 552 L 1613 575" fill="none" stroke="#62728a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1613.0,575.0 1609.92,568.0 1616.08,568.0" fill="#62728a"/><polygon points="1613.0,552.0 1616.08,559.0 1609.92,559.0" fill="#62728a"/>
+<text x="580" y="730" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="580" dy="0">Stage transition: grid-pool P · separate channel projections for A and Z</tspan>
+</text>
+<path d="M 490 285 H 523 V 403 H 600" fill="none" stroke="#2167a9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="600.0,403.0 590.0,407.4 590.0,398.6" fill="#2167a9"/>
+<path d="M 490 441 H 536 V 510 H 600" fill="none" stroke="#b36914" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="600.0,510.0 590.0,514.4 590.0,505.6" fill="#b36914"/>
+<path d="M 490 660 H 523 V 617 H 600" fill="none" stroke="#7d49ab" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="600.0,617.0 590.0,621.4 590.0,612.6" fill="#7d49ab"/>
+<rect x="1800" y="275" width="340" height="268" rx="14" fill="#f7f9fc" stroke="#a9b6c9" stroke-width="2"/>
+<text x="1825" y="315" font-family="DejaVu Sans, Arial, sans-serif" font-size="25" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="1825" dy="0">Existing action head</tspan>
+</text>
+<text x="1825" y="356" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="1825" dy="0">Final P + final A</tspan>
+<tspan x="1825" dy="34">Position / rotation / gripper</tspan>
+</text>
+<text x="1825" y="460" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="1825" dy="0">Z influences action through</tspan>
+<tspan x="1825" dy="29">the shared backbone.</tspan>
+<tspan x="1825" dy="29">No new polar output head.</tspan>
+</text>
+<path d="M 1688 403 H 1790" fill="none" stroke="#2167a9" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1790.0,403.0 1780.0,407.4 1780.0,398.6" fill="#2167a9"/>
+<path d="M 1688 510 H 1769 V 426 H 1790" fill="none" stroke="#b36914" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1790.0,426.0 1780.0,430.4 1780.0,421.6" fill="#b36914"/>
+<rect x="1800" y="590" width="340" height="180" rx="14" fill="#ebf8f3" stroke="#9ac9b9" stroke-width="2"/>
+<text x="1825" y="629" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#25836b" font-weight="700" text-anchor="start">
+<tspan x="1825" dy="0">Frozen language encoder</tspan>
+</text>
+<text x="1825" y="667" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="1825" dy="0">Projected language tokens</tspan>
+<tspan x="1825" dy="30">Cross-attention at each block</tspan>
+<tspan x="1825" dy="30">Q = P, A, Z · K/V = language</tspan>
+</text>
+<rect x="550" y="795" width="1590" height="57" rx="10" fill="#ffffff" stroke="#a8b1c0" stroke-width="1.5" stroke-dasharray="8 6"/>
+<text x="577" y="831" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="577" dy="0">Training only (optional): retain reconstruction loss on a cloned encoder hierarchy.</tspan>
+</text>
+<rect x="60" y="892" width="2080" height="471" rx="18" fill="#fbfcfe" stroke="#d4dce8" stroke-width="2"/>
+<text x="88" y="938" font-family="DejaVu Sans, Arial, sans-serif" font-size="28" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="88" dy="0">Inside one Concerto block</tspan>
+</text>
+<text x="503" y="936" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="503" dy="0">Same mechanism at every stage; C follows the current stage width.</tspan>
+</text>
+<rect x="88" y="976" width="312" height="98" rx="10" fill="#e7f1fc" stroke="#9cbfdf" stroke-width="2"/>
+<text x="111" y="1010" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#2167a9" font-weight="700" text-anchor="start">
+<tspan x="111" dy="0">P: point-only CPE</tspan>
+<tspan x="111" dy="31">+ serialization into patches</tspan>
+</text>
+<rect x="88" y="1091" width="312" height="96" rx="10" fill="#f7effc" stroke="#c5aadf" stroke-width="2"/>
+<text x="111" y="1124" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#7d49ab" font-weight="700" text-anchor="start">
+<tspan x="111" dy="0">Broadcast A and Z</tspan>
+<tspan x="111" dy="32">to every point patch</tspan>
+</text>
+<rect x="450" y="1024" width="234" height="144" rx="12" fill="#ffffff" stroke="#afbbcf" stroke-width="2"/>
+<text x="567" y="1062" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="567" dy="0">Concatenate</tspan>
+</text>
+<text x="567" y="1104" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="567" dy="0">[A, Z, Ppatch]</tspan>
+</text>
+<text x="567" y="1140" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="567" dy="0">18 + K tokens</tspan>
+</text>
+<path d="M 400 1025 H 426 V 1062 H 442" fill="none" stroke="#2167a9" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="442.0,1062.0 432.0,1066.4 432.0,1057.6" fill="#2167a9"/>
+<path d="M 400 1139 H 442" fill="none" stroke="#7d49ab" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="442.0,1139.0 432.0,1143.4 432.0,1134.6" fill="#7d49ab"/>
+<rect x="730" y="1024" width="305" height="144" rx="12" fill="#eaf0fb" stroke="#8ba3d1" stroke-width="2"/>
+<text x="882.5" y="1061" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="882.5" dy="0">Joint self-attention</tspan>
+</text>
+<text x="882.5" y="1100" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#15243c" font-weight="700" text-anchor="middle">
+<tspan x="882.5" dy="0">P ↔ A · A ↔ Z · Z ↔ P</tspan>
+</text>
+<text x="882.5" y="1140" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="middle">
+<tspan x="882.5" dy="0">Full, noncausal · shared QKV</tspan>
+</text>
+<path d="M 684 1095 H 722" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="722.0,1095.0 712.0,1099.4 712.0,1090.6" fill="#62728a"/>
+<rect x="1080" y="976" width="320" height="256" rx="12" fill="#ffffff" stroke="#afbbcf" stroke-width="2"/>
+<text x="1105" y="1015" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="1105" dy="0">Split and restore</tspan>
+</text>
+<text x="1105" y="1057" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="1105" dy="0">P: restore point order</tspan>
+<tspan x="1105" dy="37">A: mean across patches</tspan>
+<tspan x="1105" dy="37">Z: mean across patches</tspan>
+</text>
+<text x="1105" y="1196" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="1105" dy="0">Means stay within each sample.</tspan>
+</text>
+<path d="M 1035 1095 H 1072" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1072.0,1095.0 1062.0,1099.4 1062.0,1090.6" fill="#62728a"/>
+<rect x="1445" y="976" width="282" height="256" rx="12" fill="#ffffff" stroke="#afbbcf" stroke-width="2"/>
+<text x="1470" y="1016" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="1470" dy="0">Per-stream updates</tspan>
+</text>
+<text x="1470" y="1060" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="1470" dy="0">Residual + LayerNorm</tspan>
+<tspan x="1470" dy="34">Feed-forward network</tspan>
+</text>
+<text x="1470" y="1153" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="1470" dy="0">Separate P / A / Z states</tspan>
+<tspan x="1470" dy="31">A and Z share FFN weights</tspan>
+</text>
+<path d="M 1400 1095 H 1437" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1437.0,1095.0 1427.0,1099.4 1427.0,1090.6" fill="#62728a"/>
+<rect x="1772" y="976" width="340" height="256" rx="12" fill="#ebf8f3" stroke="#9ac9b9" stroke-width="2"/>
+<text x="1797" y="1016" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#25836b" font-weight="700" text-anchor="start">
+<tspan x="1797" dy="0">Language cross-attention</tspan>
+</text>
+<text x="1797" y="1060" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#15243c" font-weight="400" text-anchor="start">
+<tspan x="1797" dy="0">Q = each of P, A, Z</tspan>
+<tspan x="1797" dy="36">K/V = projected language</tspan>
+<tspan x="1797" dy="36">Context is read-only here</tspan>
+</text>
+<text x="1797" y="1196" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="1797" dy="0">→ Updated P, A, Z for next block</tspan>
+</text>
+<path d="M 1727 1095 H 1764" fill="none" stroke="#62728a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><polygon points="1764.0,1095.0 1754.0,1099.4 1754.0,1090.6" fill="#62728a"/>
+<path d="M 2120 770 H 2160 V 960 H 2020 V 968" fill="none" stroke="#25836b" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 6"/><polygon points="2020.0,968.0 2015.6,958.0 2024.4,958.0" fill="#25836b"/>
+<text x="93" y="1284" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="93" dy="0">Key interaction</tspan>
+</text>
+<text x="307" y="1284" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="307" dy="0">Each patch attends to both global streams; patch-wise A/Z updates are merged and carried forward.</tspan>
+</text>
+<text x="93" y="1322" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#15243c" font-weight="700" text-anchor="start">
+<tspan x="93" dy="0">Point geometry</tspan>
+</text>
+<text x="307" y="1322" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="307" dy="0">Serialization, sparse CPE and grid pooling apply only to P. Global A/Z tokens never enter voxel pooling.</tspan>
+</text>
+<text x="63" y="1414" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#2167a9" font-weight="700" text-anchor="start">
+<tspan x="63" dy="0">P = point tokens</tspan>
+</text>
+<text x="325" y="1414" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#b36914" font-weight="700" text-anchor="start">
+<tspan x="325" dy="0">A = action/state tokens</tspan>
+</text>
+<text x="685" y="1414" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#7d49ab" font-weight="700" text-anchor="start">
+<tspan x="685" dy="0">Z = polar tokens</tspan>
+</text>
+<text x="965" y="1414" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="965" dy="0">B = batch size · N = points · K = points per patch · C = stage width</tspan>
+</text>
+<text x="63" y="1465" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" fill="#57657b" font-weight="400" text-anchor="start">
+<tspan x="63" dy="0">Later ablation: a dense polar image encoder can initialize Z, including pixels without valid depth.</tspan>
+</text>
+<rect x="60" y="791" width="430" height="65" rx="10" fill="#ffffff" stroke="#a780c8" stroke-width="1.5" stroke-dasharray="7 5"/>
+<text x="83" y="817" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#7d49ab" font-weight="600">Later: dense polar [B, 4, H, W] + 2D PE</text>
+<text x="83" y="842" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#57657b">CNN → same 16-query resampler → Z0</text>
+<path d="M 465 791 V 752" fill="none" stroke="#7d49ab" stroke-width="2.5" stroke-dasharray="7 5"/><polygon points="465.0,752.0 469.4,762.0 460.6,762.0" fill="#7d49ab"/>
+<path d="M 754 403 H 834" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="834,403 824,398.6 824,407.4" fill="#62728a"/><path d="M 754 510 H 834" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="834,510 824,505.6 824,514.4" fill="#62728a"/><path d="M 754 617 H 834" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="834,617 824,612.6 824,621.4" fill="#62728a"/><path d="M 988 403 H 1068" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1068,403 1058,398.6 1058,407.4" fill="#62728a"/><path d="M 988 510 H 1068" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1068,510 1058,505.6 1058,514.4" fill="#62728a"/><path d="M 988 617 H 1068" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1068,617 1058,612.6 1058,621.4" fill="#62728a"/><path d="M 1222 403 H 1302" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1302,403 1292,398.6 1292,407.4" fill="#62728a"/><path d="M 1222 510 H 1302" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1302,510 1292,505.6 1292,514.4" fill="#62728a"/><path d="M 1222 617 H 1302" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1302,617 1292,612.6 1292,621.4" fill="#62728a"/><path d="M 1456 403 H 1536" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1536,403 1526,398.6 1526,407.4" fill="#62728a"/><path d="M 1456 510 H 1536" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1536,510 1526,505.6 1526,514.4" fill="#62728a"/><path d="M 1456 617 H 1536" fill="none" stroke="#62728a" stroke-width="2.5"/><polygon points="1536,617 1526,612.6 1526,621.4" fill="#62728a"/></svg>

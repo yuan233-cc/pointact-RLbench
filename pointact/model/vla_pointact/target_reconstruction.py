@@ -62,14 +62,29 @@ class VisibleTargetReconstructionHead(nn.Module):
             if count:
                 sample_logits = logits[start:end]
                 sample_coords = corrected[start:end]
-                selected = torch.topk(
-                    sample_logits, min(self.max_pred_points, len(sample_logits))
-                ).indices
-                gt = target_points[sample, :count].to(sample_coords.dtype)
-                distances = torch.cdist(sample_coords[selected], gt).square()
-                geometric_losses.append(
-                    distances.min(dim=1).values.mean() + distances.min(dim=0).values.mean()
+                # Geometry supervision is teacher-forced onto the visible
+                # target/relevant support.  Selecting a fixed top-K from the
+                # entire scene used to pull background points into the
+                # reconstruction whenever fewer than max_pred_points target
+                # inputs were visible.  Never fill that shortfall with
+                # unrelated scene points.
+                positive_indices = torch.nonzero(
+                    target_input_mask[start:end] > 0.5, as_tuple=False
+                ).flatten()
+                selected_count = min(
+                    self.max_pred_points, count, len(positive_indices)
                 )
+                if selected_count:
+                    positive_logits = sample_logits[positive_indices]
+                    selected = positive_indices[
+                        torch.topk(positive_logits, selected_count).indices
+                    ]
+                    gt = target_points[sample, :count].to(sample_coords.dtype)
+                    distances = torch.cdist(sample_coords[selected], gt).square()
+                    geometric_losses.append(
+                        distances.min(dim=1).values.mean()
+                        + distances.min(dim=0).values.mean()
+                    )
             start = end
         geometry_loss = torch.stack(geometric_losses).mean() if geometric_losses else logits.sum() * 0
         return mask_loss, geometry_loss

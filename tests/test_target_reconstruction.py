@@ -73,3 +73,52 @@ def test_no_visible_target_skips_geometry_without_nan():
     assert geometry_loss == 0
     (mask_loss + geometry_loss).backward()
     assert features.grad is not None
+
+
+def test_geometry_never_fills_target_shortfall_with_background_points():
+    head = VisibleTargetReconstructionHead(4, max_pred_points=3)
+    with torch.no_grad():
+        head.delta.weight.zero_()
+        head.delta.bias.zero_()
+
+    features = torch.randn(4, 4, requires_grad=True)
+    coords = torch.tensor([
+        [0.0, 0.0, 0.0],       # the only visible target input
+        [10.0, 0.0, 0.0],      # unrelated background
+        [0.0, 10.0, 0.0],      # unrelated background
+        [0.0, 0.0, 10.0],      # unrelated background
+    ])
+    # The second row is padding and must also be ignored by target_counts.
+    padded_target = torch.tensor([[[0.0, 0.0, 0.0], [999.0, 999.0, 999.0]]])
+    mask_loss, geometry_loss = head.loss(
+        features,
+        coords,
+        torch.tensor([4]),
+        padded_target,
+        torch.tensor([1]),
+        torch.tensor([1.0, 0.0, 0.0, 0.0]),
+    )
+
+    assert mask_loss.isfinite()
+    assert geometry_loss == 0
+    (mask_loss + geometry_loss).backward()
+    assert features.grad is not None
+    assert head.delta.weight.grad is not None
+
+
+def test_geometry_skips_frame_when_no_target_input_is_visible():
+    head = VisibleTargetReconstructionHead(4, max_pred_points=3)
+    features = torch.randn(3, 4, requires_grad=True)
+    mask_loss, geometry_loss = head.loss(
+        features,
+        torch.tensor([[5.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 5.0]]),
+        torch.tensor([3]),
+        torch.tensor([[[0.0, 0.0, 0.0]]]),
+        torch.tensor([1]),
+        torch.zeros(3),
+    )
+
+    assert mask_loss.isfinite()
+    assert geometry_loss == 0
+    (mask_loss + geometry_loss).backward()
+    assert features.grad is not None

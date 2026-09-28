@@ -60,6 +60,7 @@ class ClientArgs:
     replan_steps: int = 8
     clip_within_workspace: bool = False
     action_ensemble: bool = False
+    reset_policy_each_episode: bool = False
 
     # point cloud
     remove_arm: bool = False
@@ -222,6 +223,11 @@ def producer_fn(proc_id, args, taskvar, pred_file, producer_queue):
         else:
             print("Resetting to demo", episode_id)
             instructions, obs = task.reset_to_demo(demos[episode_id])  # type: ignore
+
+        if args.reset_policy_each_episode:
+            policy_client.reset(
+                options={"seed": args.seed + episode_id, "episode_id": episode_id}
+            )
 
         # instruction = random.choice(instructions)
         instruction = instructions[0]

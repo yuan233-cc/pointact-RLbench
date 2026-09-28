@@ -1,0 +1,133 @@
+{
+  "_metadata": {
+    "schema_version": 1,
+    "scope": "LIBERO-Spatial visual geoms",
+    "status": "engineering priors, not measured asset materials",
+    "notes": "Glob keys are expanded to exact MuJoCo geom names by mujoco_native_polar.py. RGB training images still come from LIBERO; these BSDFs control the independent Stokes render."
+  },
+  "floor": {
+    "type": "diffuse",
+    "reflectance": [0.18, 0.18, 0.18]
+  },
+  "wall_*": {
+    "type": "diffuse",
+    "reflectance": [0.55, 0.55, 0.55]
+  },
+  "table_visual": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.28,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.32, 0.28, 0.22],
+    "specular_reflectance": 1.0
+  },
+  "table_leg*_visual": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.30,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.24, 0.21, 0.18],
+    "specular_reflectance": 1.0
+  },
+  "robot0_g*_vis": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.14,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "specular_reflectance": 1.0
+  },
+  "mount0_*_vis": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.18,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "specular_reflectance": 1.0
+  },
+  "gripper0_*_visual": {
+    "type": "roughconductor",
+    "material": "Al",
+    "alpha": 0.18,
+    "distribution": "ggx",
+    "sample_visible": false
+  },
+  "akita_black_bowl_1_g0": {
+    "type": "pplastic",
+    "eta": 1.52,
+    "alpha": 0.06,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.015, 0.015, 0.015],
+    "specular_reflectance": 1.0
+  },
+  "akita_black_bowl_2_g0": {
+    "type": "pplastic",
+    "eta": 1.52,
+    "alpha": 0.06,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.015, 0.015, 0.015],
+    "specular_reflectance": 1.0
+  },
+  "plate_1_g0": {
+    "type": "pplastic",
+    "eta": 1.52,
+    "alpha": 0.05,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.75, 0.75, 0.75],
+    "specular_reflectance": 1.0
+  },
+  "glazed_rim_porcelain_ramekin_1_g0": {
+    "type": "pplastic",
+    "eta": 1.52,
+    "alpha": 0.05,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.72, 0.72, 0.72],
+    "specular_reflectance": 1.0
+  },
+  "cookies_1_g0": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.25,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "specular_reflectance": 1.0
+  },
+  "wooden_cabinet_1_g*": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.18,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "diffuse_reflectance": [0.30, 0.18, 0.09],
+    "specular_reflectance": 1.0
+  },
+  "flat_stove_1_base_vis": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.16,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "specular_reflectance": 1.0
+  },
+  "flat_stove_1_burner": {
+    "type": "roughconductor",
+    "material": "Al",
+    "alpha": 0.22,
+    "distribution": "ggx",
+    "sample_visible": false
+  },
+  "flat_stove_1_g*": {
+    "type": "pplastic",
+    "eta": 1.50,
+    "alpha": 0.20,
+    "distribution": "ggx",
+    "sample_visible": false,
+    "specular_reflectance": 1.0
+  }
+}

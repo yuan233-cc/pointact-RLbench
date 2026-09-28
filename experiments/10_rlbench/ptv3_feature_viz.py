@@ -47,15 +47,19 @@ class FeatureCapture:
         self.capture_index = 0
         self.metadata: dict = {}
         self.pending_arrays: dict[str, np.ndarray] | None = None
+        self.request_capture_enabled = True
 
     @property
     def enabled_for_request(self) -> bool:
+        if not self.request_capture_enabled:
+            return False
         if self.request_index < 0 or self.request_index % self.capture_every != 0:
             return False
         return self.max_captures <= 0 or self.capture_index < self.max_captures
 
     def begin_request(self, batch: dict) -> None:
         self.request_index += 1
+        self.request_capture_enabled = True
         self.pending_arrays = None
         tasks = batch.get("task", ["unknown"])
         instruction = str(tasks[0]) if tasks else "unknown"

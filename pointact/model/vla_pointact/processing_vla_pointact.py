@@ -13,6 +13,7 @@ from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.video_utils import VideoInput
 
 from pointact.constants import DEFAULT_STATE_TOKEN, STATE_END_TOKEN, STATE_START_TOKEN
+from pointact.data.polar_material import polar_vlm_image
 from pointact.model.backbone.processor_base import RobotPointProcessorBase
 from pointact.utils.rotation import convert_rotation
 from pointact.utils.torch_utils import pad_vector
@@ -99,11 +100,26 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
             select_video_keys = self.robot_config["select_video_keys_for_vlm"][repo_id]
             select_state_keys = self.robot_config["select_state_keys"][repo_id]
 
+            image_modes = self.robot_config.get("vlm_image_mode", {})
+            if image_modes.get(repo_id, "rgb") == "polar":
+                if len(select_video_keys) != 1:
+                    raise ValueError("Polar VLM image mode requires exactly one selected VLM image key")
+                if "polar_dense" not in mini_batch:
+                    raise ValueError("Polar VLM image mode requires polar_dense at inference")
+                polar = mini_batch["polar_dense"]
+                if isinstance(polar, torch.Tensor) and polar.ndim == 3 and polar.shape[-1] == 4:
+                    polar = polar.permute(2, 0, 1)
+                elif isinstance(polar, np.ndarray) and polar.ndim == 3 and polar.shape[-1] == 4:
+                    polar = np.moveaxis(polar, -1, 0)
+                image_values = {select_video_keys[0]: polar_vlm_image(polar)}
+            else:
+                image_values = {key: mini_batch[key] for key in select_video_keys}
+
             messages = [
                 {
                     "role": "user",
                     "content": [
-                        *({"type": "image", "image": mini_batch[k]} for k in select_video_keys),
+                        *({"type": "image", "image": image_values[k]} for k in select_video_keys),
                     ],
                 }
             ]
