@@ -10,8 +10,20 @@ export HF_DATASETS_OFFLINE=1
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="$repo_root:${PYTHONPATH:-}"
 
-if [[ -z "${SFP_CHECKPOINT:-}" || ! -f "$SFP_CHECKPOINT" ]]; then
-    echo "Set SFP_CHECKPOINT to the official onlyiun_pol_vd checkpoint." >&2
+sfp_allow_random_init="${SFP_ALLOW_RANDOM_INIT:-False}"
+sfp_freeze="${SFP_FREEZE:-True}"
+sfp_checkpoint_args=()
+if [[ -n "${SFP_CHECKPOINT:-}" && -f "$SFP_CHECKPOINT" ]]; then
+    sfp_checkpoint_args=(--sfp_checkpoint "$SFP_CHECKPOINT" --sfp_allow_random_init False)
+elif [[ "${sfp_allow_random_init,,}" == "true" ]]; then
+    if [[ "${sfp_freeze,,}" == "true" ]]; then
+        echo "SFP_ALLOW_RANDOM_INIT=True requires SFP_FREEZE=False so the random encoder can learn." >&2
+        exit 2
+    fi
+    sfp_checkpoint_args=(--sfp_allow_random_init True)
+    echo "WARNING: training SfP-Wild from random initialization; no pretrained checkpoint is loaded." >&2
+else
+    echo "Set SFP_CHECKPOINT to the official onlyiun_pol_vd checkpoint, or explicitly set SFP_ALLOW_RANDOM_INIT=True and SFP_FREEZE=False." >&2
     exit 2
 fi
 ptv3_checkpoint="${PTV3_INIT_CKPT_FILE:-$repo_root/pretrained/Pointcept-Concerto/concerto_large.pth}"
@@ -57,8 +69,8 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_apply_point_ca False --ptv3_init_ckpt_file "$ptv3_checkpoint" \
     --action_regression_loss l2 --action_head_pos_center zero \
     --max_state_dim 10 --max_action_dim 10 \
-    --polar_enabled True --sfp_checkpoint "$SFP_CHECKPOINT" \
-    --sfp_freeze "${SFP_FREEZE:-True}" \
+    --polar_enabled True "${sfp_checkpoint_args[@]}" \
+    --sfp_freeze "$sfp_freeze" \
     --sfp_feature_levels x1 x2 x3 x4 x5 \
     --polar_neighbor_radius "${POLAR_NEIGHBOR_RADIUS:-1}" \
     --polar_max_tokens_per_group "${POLAR_MAX_TOKENS_PER_GROUP:-32}" \
