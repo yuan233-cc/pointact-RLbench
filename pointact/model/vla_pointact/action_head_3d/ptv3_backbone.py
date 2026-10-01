@@ -2,6 +2,11 @@ import torch
 import torch.nn as nn
 
 
+def _supports_flash_attention():
+    """FlashAttention kernels require an Ampere-or-newer CUDA device."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+
+
 def get_ptv3_model_cls(ptv3_backend, with_action=False):
     ptv3_backend = (ptv3_backend or "concerto").lower()
     if ptv3_backend == "concerto":
@@ -71,7 +76,7 @@ class PointTransformerUnet(nn.Module):
             drop_path=0.,
             pre_norm=True,
             shuffle_orders=True,
-            enable_flash=True,
+            enable_flash=_supports_flash_attention(),
             enc_mode=enc_mode,
         )
         if enc_mode:
@@ -169,7 +174,7 @@ class PointTransformerUnetWithAction(nn.Module):
             drop_path=0.,
             pre_norm=True,
             shuffle_orders=True,
-            enable_flash=True,
+            enable_flash=_supports_flash_attention(),
             enc_mode=enc_mode and not auxiliary_decoder,
             apply_point_ca=apply_point_ca,
             polar_enabled=polar_enabled,
