@@ -262,7 +262,10 @@ class JointAttentionTest(unittest.TestCase):
             self.assertIsNotNone(gradient)
             self.assertTrue(torch.isfinite(gradient).all())
 
-    @unittest.skipUnless(torch.cuda.is_available(), "Flash/reference parity requires a CUDA GPU")
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8,
+        "Flash/reference parity requires an Ampere-or-newer CUDA GPU",
+    )
     def test_flash_and_reference_attention_output_and_gradient(self):
         try:
             import flash_attn
