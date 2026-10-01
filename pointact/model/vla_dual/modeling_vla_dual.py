@@ -22,6 +22,12 @@ class VLADualOutputWithPast(ModelOutput):
     action_loss: torch.FloatTensor | None = None
     text_loss: torch.FloatTensor | None = None
     target_reconstruction_loss: torch.FloatTensor | None = None
+    polar_depth_self_supervision_loss: torch.FloatTensor | None = None
+    polar_consistency_loss: torch.FloatTensor | None = None
+    polar_phase_loss: torch.FloatTensor | None = None
+    polar_dolp_loss: torch.FloatTensor | None = None
+    sparse_depth_consistency_loss: torch.FloatTensor | None = None
+    depth_smoothness_loss: torch.FloatTensor | None = None
 
     actions: torch.FloatTensor | None = None
     logits: torch.FloatTensor | None = None

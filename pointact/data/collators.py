@@ -151,5 +151,12 @@ class DataCollator(DefaultDataCollator):
                     raise ValueError(f"Cannot mix examples with and without {key}")
                 if all(present):
                     data_dict[key] = torch.stack([example[key] for example in examples])
+            depth_keys = ("observed_depth", "observed_depth_valid")
+            depth_present = [all(key in example for key in depth_keys) for example in examples]
+            if any(depth_present) and not all(depth_present):
+                raise ValueError("Cannot mix examples with and without sparse observed depth")
+            if all(depth_present):
+                for key in depth_keys:
+                    data_dict[key] = torch.stack([example[key] for example in examples])
 
         return data_dict

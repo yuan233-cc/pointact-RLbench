@@ -59,6 +59,11 @@ class LerobotConfig:
     polar_feature_normalization: str = "raw"  # raw, rgb
     polar_dense_dirname: str | None = None
     polar_dense_frames_dir: str | None = None
+    sfp_input_dirname: str | None = None
+    # Pixel indices aligned row-for-row with the input point cloud.  These are
+    # used to rasterize observed points into a sparse metric-depth target for
+    # the self-supervised objective. This target is not a decoder input.
+    depth_point_pixel_dirname: str | None = None
     vlm_image_mode: str = "rgb"  # rgb, polar
     point_pixel_dirname: str | None = None
     material_profiles_file: str | None = None

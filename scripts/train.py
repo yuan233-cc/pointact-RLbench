@@ -66,12 +66,19 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
     if (training_args.use_target_reconstruction and
             recipe.model_class.rsplit(".", 1)[-1] != "VLAEncDec3DWithActionClassificationModel"):
         raise ValueError("Target reconstruction supports the PointACT with-action classifier")
+    if (training_args.use_polar_depth_self_supervision and
+            recipe.model_class.rsplit(".", 1)[-1] != "VLAEncDec3DWithActionRegressionModel"):
+        raise ValueError(
+            "Polar/depth self-supervision supports the PointACT with-action regressor"
+        )
     if training_args.model_name_or_path is None:
         return build_fresh_model(recipe, training_args, compute_dtype)
 
     model_class = _import_object(recipe.model_class)
     config = None
-    if training_args.use_polar_material_conditioning or training_args.use_target_reconstruction:
+    if (training_args.use_polar_material_conditioning
+            or training_args.use_target_reconstruction
+            or training_args.use_polar_depth_self_supervision):
         config_class = _import_object(recipe.config_class)
         overrides = {}
         if training_args.use_polar_material_conditioning:
@@ -82,6 +89,24 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
                 target_reconstruction_weight=training_args.target_reconstruction_weight,
                 target_mask_loss_weight=training_args.target_mask_loss_weight,
                 target_reconstruction_max_points=training_args.target_reconstruction_max_points,
+            )
+        if training_args.use_polar_depth_self_supervision:
+            overrides.update(
+                polar_enabled=True,
+                sfp_checkpoint=training_args.sfp_checkpoint,
+                sfp_freeze=training_args.sfp_freeze,
+                sfp_allow_random_init=training_args.sfp_allow_random_init,
+                use_polar_depth_self_supervision=True,
+                polar_depth_loss_weight=training_args.polar_depth_loss_weight,
+                polar_consistency_weight=training_args.polar_consistency_weight,
+                sparse_depth_consistency_weight=training_args.sparse_depth_consistency_weight,
+                depth_smoothness_weight=training_args.depth_smoothness_weight,
+                polar_refractive_index=training_args.polar_refractive_index,
+                polar_min_dolp=training_args.polar_min_dolp,
+                polar_dolp_weight=training_args.polar_dolp_weight,
+                polar_depth_keep_probability=training_args.polar_depth_keep_probability,
+                polar_depth_min=training_args.polar_depth_min,
+                polar_depth_max=training_args.polar_depth_max,
             )
         config = config_class.from_pretrained(
             training_args.model_name_or_path,

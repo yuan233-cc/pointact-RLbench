@@ -21,6 +21,11 @@ from pointact.model.vla_pointact.action_head_3d.sfp_wild_encoder import (
     SfpWildFeatureEncoder,
     load_sfp_wild_checkpoint,
 )
+from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision import (
+    PolarDepthSelfSupervision,
+    mask_points_at_depth_targets,
+    rasterize_fused_point_features,
+)
 from pointact.model.vla_pointact.polar_material_conditioner import PolarMaterialConditioner
 from pointact.model.vla_pointact.target_reconstruction import (
     VisibleTargetReconstructionHead, copy_point_tree,
@@ -192,6 +197,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         view_valid: torch.Tensor | None = None,
         pixel_valid: torch.Tensor | None = None,
         polar_pixel_transform: torch.Tensor | None = None,
+        observed_depth: torch.Tensor | None = None,
+        observed_depth_valid: torch.Tensor | None = None,
         target_points: torch.Tensor | None = None,
         target_counts: torch.Tensor | None = None,
         target_input_mask: torch.Tensor | None = None,
@@ -272,6 +279,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         loss = None
         action_loss = None
         target_reconstruction_loss = None
+        polar_depth_self_supervision_loss = None
+        polar_consistency_loss = None
+        polar_phase_loss = None
+        polar_dolp_loss = None
+        sparse_depth_consistency_loss = None
+        depth_smoothness_loss = None
         if actions is not None:
             auxiliary_labels = {}
             if getattr(self.config, "use_target_reconstruction", False) and self.training:
@@ -295,17 +308,36 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 view_valid=view_valid,
                 pixel_valid=pixel_valid,
                 polar_pixel_transform=polar_pixel_transform,
+                observed_depth=observed_depth,
+                observed_depth_valid=observed_depth_valid,
                 **auxiliary_labels,
             )
             if isinstance(action_result, tuple):
                 action_loss = action_result[0]
                 if len(action_result) > 2:
                     target_reconstruction_loss = action_result[2]
+                if len(action_result) > 3:
+                    polar_auxiliary = action_result[3]
+                    if isinstance(polar_auxiliary, dict):
+                        polar_depth_self_supervision_loss = polar_auxiliary["loss"]
+                        polar_consistency_loss = polar_auxiliary["polar_loss"]
+                        polar_phase_loss = polar_auxiliary["polar_phase_loss"]
+                        polar_dolp_loss = polar_auxiliary["polar_dolp_loss"]
+                        sparse_depth_consistency_loss = polar_auxiliary["sparse_depth_loss"]
+                        depth_smoothness_loss = polar_auxiliary["smoothness_loss"]
+                    else:
+                        polar_depth_self_supervision_loss = polar_auxiliary
             else:
                 action_loss = action_result
             loss = action_loss
             if target_reconstruction_loss is not None:
                 loss = loss + self.config.target_reconstruction_weight * target_reconstruction_loss
+            if polar_depth_self_supervision_loss is not None:
+                loss = (
+                    loss
+                    + self.config.polar_depth_loss_weight
+                    * polar_depth_self_supervision_loss
+                )
 
         text_loss = None
         logits = None
@@ -323,6 +355,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             action_loss=action_loss,
             text_loss=text_loss,
             target_reconstruction_loss=target_reconstruction_loss,
+            polar_depth_self_supervision_loss=polar_depth_self_supervision_loss,
+            polar_consistency_loss=polar_consistency_loss,
+            polar_phase_loss=polar_phase_loss,
+            polar_dolp_loss=polar_dolp_loss,
+            sparse_depth_consistency_loss=sparse_depth_consistency_loss,
+            depth_smoothness_loss=depth_smoothness_loss,
             actions=output_actions,
             logits=logits,
             past_key_values=outputs.past_key_values,
@@ -949,10 +987,28 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                     "sfp_allow_random_init=True only for explicit from-scratch tests"
                 )
             self.sfp_encoder = SfpWildFeatureEncoder()
-            # Normal supervision is not wired into the dataset/loss yet. Keep
-            # the newly restored decoder out of the optimizer's gradient graph
-            # until that loss is enabled, while still loading its checkpoint.
+            # The self-supervised path obtains normals by differentiating its
+            # predicted depth. SfP-Wild's separate normal decoder is therefore
+            # kept out of the optimizer while its checkpoint still loads.
             self.sfp_encoder.set_normal_decoder_trainable(False)
+        if self.config.use_polar_depth_self_supervision:
+            self.polar_depth_self_supervision = PolarDepthSelfSupervision(
+                feature_channels=SfpWildFeatureEncoder.feature_channels,
+                point_feature_channels=tuple(self.config.ptv3_enc_channels),
+                min_depth=self.config.polar_depth_min,
+                max_depth=self.config.polar_depth_max,
+                refractive_index=self.config.polar_refractive_index,
+                min_dolp=self.config.polar_min_dolp,
+                dolp_weight=self.config.polar_dolp_weight,
+                depth_keep_probability=self.config.polar_depth_keep_probability,
+                polar_weight=self.config.polar_consistency_weight,
+                sparse_depth_weight=self.config.sparse_depth_consistency_weight,
+                smoothness_weight=self.config.depth_smoothness_weight,
+            )
+            self.completion_action_projection = nn.Sequential(
+                nn.LayerNorm(32),
+                nn.Linear(32, self.ptv3_model.output_size),
+            )
         if self.config.use_polar_material_conditioning:
             if self.config.ptv3_backend != "concerto":
                 raise ValueError("Polar material conditioning currently requires the concerto PTv3 backend")
@@ -997,6 +1053,13 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         )
     
         self.post_init()
+        if self.config.use_polar_depth_self_supervision:
+            with torch.no_grad():
+                # Preserve the baseline action path at initialization. The
+                # action loss starts using completion features as this zero
+                # initialized bridge learns.
+                self.completion_action_projection[-1].weight.zero_()
+                self.completion_action_projection[-1].bias.zero_()
         if self.config.polar_enabled:
             for module in self.ptv3_model.modules():
                 copy_qkv = getattr(module, "copy_polar_qkv_", None)
@@ -1016,6 +1079,13 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
     def to_float32_action_head(self):
         if self.config.polar_enabled:
             self.sfp_encoder = self.sfp_encoder.to(dtype=torch.float32)
+        if self.config.use_polar_depth_self_supervision:
+            self.polar_depth_self_supervision = self.polar_depth_self_supervision.to(
+                dtype=torch.float32
+            )
+            self.completion_action_projection = self.completion_action_projection.to(
+                dtype=torch.float32
+            )
         if self.config.use_polar_material_conditioning:
             self.polar_material_conditioner = self.polar_material_conditioner.to(dtype=torch.float32)
         self.ctx_proj = self.ctx_proj.to(dtype=torch.float32)
@@ -1083,6 +1153,40 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             context["polar_pixel_transform"] = values["polar_pixel_transform"]
         return context
 
+    def _decode_polar_completion(
+        self,
+        stage_points,
+        polar_context,
+        polar_images,
+        observed_depth=None,
+        observed_depth_valid=None,
+        compute_loss=False,
+        depth_supervision_mask=None,
+    ):
+        point_levels, point_valid_levels = rasterize_fused_point_features(
+            stage_points=stage_points,
+            feature_levels=polar_context["polar_feature_levels"],
+            intrinsics=polar_context["polar_K"],
+            transforms=polar_context["T_camera_from_model"],
+            image_hw=polar_context["polar_image_hw"],
+            view_valid=polar_context["view_valid"],
+            pixel_valid=polar_context.get("pixel_valid"),
+            pixel_transform=polar_context.get("polar_pixel_transform"),
+        )
+        return self.polar_depth_self_supervision(
+            feature_levels=polar_context["polar_feature_levels"],
+            point_feature_levels=point_levels,
+            point_valid_levels=point_valid_levels,
+            polar_images=polar_images,
+            intrinsics=polar_context["polar_K"],
+            observed_depth=observed_depth,
+            observed_depth_valid=observed_depth_valid,
+            pixel_valid=polar_context.get("pixel_valid"),
+            view_valid=polar_context.get("view_valid"),
+            compute_loss=compute_loss,
+            depth_supervision_mask=depth_supervision_mask,
+        )
+
     def compute_action_loss(
         self,
         points: torch.Tensor,
@@ -1094,10 +1198,20 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         action_is_pad: torch.Tensor,
         **kwargs,
     ) -> Tensor:
-        pred_actions = self.compute_action(
+        batch_size = ctx_embeds.size(0)
+        polar_context = self._build_polar_context(batch_size, **kwargs)
+        action_output = self.compute_action(
             points, npoints_in_batch, ctx_embeds, ctx_lens, states,
+            _polar_context=polar_context,
+            _return_polar_auxiliary=self.config.use_polar_depth_self_supervision,
+            _compute_polar_loss=self.config.use_polar_depth_self_supervision,
             **kwargs,
         )
+        if self.config.use_polar_depth_self_supervision:
+            pred_actions, polar_depth_auxiliary = action_output
+        else:
+            pred_actions = action_output
+            polar_depth_auxiliary = None
         if self.config.action_regression_loss == "l2":
             action_losses = F.mse_loss(pred_actions, actions, reduction="none")
         else:
@@ -1113,6 +1227,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         open_loss = action_losses[..., 9].sum() / valid_action_count
         #print(action_loss, pos_loss, rot_loss, open_loss)
         
+        if polar_depth_auxiliary is not None:
+            return action_loss, (pos_loss, rot_loss, open_loss), None, polar_depth_auxiliary
         return action_loss, (pos_loss, rot_loss, open_loss)
  
     def compute_action(
@@ -1139,12 +1255,70 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             state_embs = self.state_encoder(states.unsqueeze(1), embodiment_id)
             action_features = torch.cat([state_embs, action_features], dim=1)
 
-        point_fts, point_coords, point_offsets, action_out_embeds = self.ptv3_model(
+        polar_context = kwargs.pop("_polar_context", None)
+        if polar_context is None:
+            polar_context = self._build_polar_context(batch_size, **kwargs)
+        return_polar_auxiliary = kwargs.pop("_return_polar_auxiliary", False)
+        compute_auxiliary_loss = kwargs.pop("_compute_polar_loss", False)
+        point_condition = self._material_point_condition(npoints_in_batch, **kwargs)
+        depth_supervision_mask = None
+        if (
+            self.config.use_polar_depth_self_supervision
+            and compute_auxiliary_loss
+            and self.training
+        ):
+            observed_valid = kwargs.get("observed_depth_valid")
+            if observed_valid is None:
+                raise ValueError("observed_depth_valid is required for masked completion")
+            random_keep = torch.rand_like(observed_valid.float()) < (
+                self.config.polar_depth_keep_probability
+            )
+            depth_supervision_mask = observed_valid.bool() & ~random_keep
+            points, npoints_in_batch, point_keep = mask_points_at_depth_targets(
+                points=points,
+                npoints_in_batch=npoints_in_batch,
+                target_mask=depth_supervision_mask,
+                intrinsics=polar_context["polar_K"],
+                transforms=polar_context["T_camera_from_model"],
+                view_valid=polar_context["view_valid"],
+                pixel_transform=polar_context.get("polar_pixel_transform"),
+            )
+            if point_condition is not None:
+                point_condition = point_condition[point_keep]
+        ptv3_output = self.ptv3_model(
             points, npoints_in_batch, ctx_embeds, ctx_lens,
             action_features,
-            point_condition=self._material_point_condition(npoints_in_batch, **kwargs),
-            polar_context=self._build_polar_context(batch_size, **kwargs),
+            point_condition=point_condition,
+            polar_context=polar_context,
+            return_stage_points=self.config.use_polar_depth_self_supervision,
         )
+        if self.config.use_polar_depth_self_supervision:
+            point_fts, point_coords, point_offsets, action_out_embeds, stage_points = ptv3_output
+            observed_depth = kwargs.get("observed_depth")
+            observed_depth_valid = kwargs.get("observed_depth_valid")
+            if compute_auxiliary_loss and (
+                observed_depth is None or observed_depth_valid is None
+            ):
+                raise ValueError(
+                    "Polar/depth self-supervision is enabled during training; "
+                    "observed_depth and observed_depth_valid are required"
+                )
+            polar_depth_auxiliary = self._decode_polar_completion(
+                stage_points=stage_points,
+                polar_context=polar_context,
+                polar_images=kwargs["polar_images"],
+                observed_depth=observed_depth,
+                observed_depth_valid=observed_depth_valid,
+                compute_loss=compute_auxiliary_loss,
+                depth_supervision_mask=depth_supervision_mask,
+            )
+            completion = self.completion_action_projection(
+                polar_depth_auxiliary["completion_token"].to(action_out_embeds.dtype)
+            )
+            action_out_embeds = action_out_embeds + completion[:, None, :]
+        else:
+            point_fts, point_coords, point_offsets, action_out_embeds = ptv3_output
+            polar_depth_auxiliary = None
         out_npoints_in_batch = torch.diff(
             point_offsets, prepend=torch.tensor([0], device=device, dtype=torch.long)
         )
@@ -1158,6 +1332,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             npoints_in_batch=out_npoints_in_batch,
         )
     
+        if return_polar_auxiliary:
+            return pred_actions, polar_depth_auxiliary
         return pred_actions
          
 

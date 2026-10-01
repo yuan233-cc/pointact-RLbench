@@ -50,6 +50,15 @@ class VLATrainer(Trainer):
         super().__init__(*args, **kwargs)
         if getattr(self.model.config, "use_target_reconstruction", False):
             self.meta_losses = self.meta_losses + ("target_reconstruction_loss",)
+        if getattr(self.model.config, "use_polar_depth_self_supervision", False):
+            self.meta_losses = self.meta_losses + (
+                "polar_depth_self_supervision_loss",
+                "polar_consistency_loss",
+                "polar_phase_loss",
+                "polar_dolp_loss",
+                "sparse_depth_consistency_loss",
+                "depth_smoothness_loss",
+            )
         self.add_callback(MetaLossesTrainerState(list(self.meta_losses)))
 
     def _has_special_lrs(self):

@@ -109,7 +109,7 @@ class MonolithicPrompt:
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
                 "target_points", "target_input_mask", "polar_images", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
-                "polar_pixel_transform",
+                "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):
                 if key in item:
                     sources[key] = item[key]
@@ -149,7 +149,7 @@ class DualPrompt:
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
                 "target_points", "target_input_mask", "polar_images", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
-                "polar_pixel_transform",
+                "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):
                 if key in item:
                     sources[key] = item[key]
@@ -439,7 +439,7 @@ class SupervisedDataset(Dataset):
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
                 "target_points", "target_input_mask", "polar_images", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
-                "polar_pixel_transform",
+                "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):
                 if key in sources:
                     data_dict[key] = sources[key]

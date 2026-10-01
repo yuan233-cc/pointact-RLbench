@@ -1,6 +1,7 @@
+import io
+import json
 import os
 import random
-import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -75,6 +76,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         polar_feature_normalization: str = "raw",
         polar_dense_dirname: str | None = None,
         polar_dense_frames_dir: str | None = None,
+        sfp_input_dirname: str | None = None,
+        depth_point_pixel_dirname: str | None = None,
         vlm_image_mode: str = "rgb",
         point_pixel_dirname: str | None = None,
         material_profiles_file: str | None = None,
@@ -130,12 +133,24 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError("Material conditioning requires point pixels, material profiles, and one dense polar source")
         if vlm_image_mode == "polar" and not has_dense_polar:
             raise ValueError("Polar VLM image mode requires one dense polar source")
-        if has_dense_polar and vlm_image_mode != "polar" and not material_requested:
-            raise ValueError("A dense polar source requires polar VLM image mode or material conditioning")
+        if sfp_input_dirname and not has_dense_polar:
+            raise ValueError("SfP-Wild inputs require one dense polar source")
+        if depth_point_pixel_dirname and not sfp_input_dirname:
+            raise ValueError("Sparse depth rasterization requires SfP-Wild camera metadata")
+        if has_dense_polar and vlm_image_mode != "polar" and not material_requested and not sfp_input_dirname:
+            raise ValueError(
+                "A dense polar source requires polar VLM image mode, material conditioning, "
+                "or SfP-Wild inputs"
+            )
         self.use_polar_material_conditioning = material_requested
         self.polar_dense_dir = self._resolve_sidecar_path(polar_dense_dirname) if polar_dense_dirname else None
         self.polar_dense_frames_dir = self._resolve_sidecar_path(polar_dense_frames_dir) if polar_dense_frames_dir else None
         self.point_pixel_dir = self._resolve_sidecar_path(point_pixel_dirname) if point_pixel_dirname else None
+        self.sfp_input_dir = self._resolve_sidecar_path(sfp_input_dirname) if sfp_input_dirname else None
+        self.depth_point_pixel_dir = (
+            self._resolve_sidecar_path(depth_point_pixel_dirname)
+            if depth_point_pixel_dirname else None
+        )
         self.material_candidates = (torch.from_numpy(load_material_candidates(
             self._resolve_sidecar_path(material_profiles_file), material_candidate_names
         )) if material_requested else None)
@@ -205,9 +220,39 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 raise KeyError(f"Missing sidecar {ep_idx}-{frame_idx} in {path}")
             return bytes(value)
 
-    def _load_point_pixels(self, ep_idx, frame_idx):
-        value = self._read_sidecar(self.point_pixel_dir, ep_idx, frame_idx)
+    def _load_point_pixels(self, ep_idx, frame_idx, path=None):
+        value = self._read_sidecar(path or self.point_pixel_dir, ep_idx, frame_idx)
         return np.asarray(msgpack.unpackb(value) if isinstance(value, bytes) else value, dtype=np.int32)
+
+    @staticmethod
+    def _rasterize_sparse_depth(
+        point_cloud: np.ndarray,
+        point_pixels: np.ndarray,
+        camera_from_world: np.ndarray,
+        height: int,
+        width: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project aligned observed points into a z-buffered metric-depth map."""
+        pixels = np.asarray(point_pixels, dtype=np.int64).reshape(-1)
+        if len(pixels) != len(point_cloud):
+            raise ValueError("Depth point pixels and point cloud have different row counts")
+        xyz = np.asarray(point_cloud[:, :3], dtype=np.float32)
+        transform = np.asarray(camera_from_world, dtype=np.float32)
+        if transform.shape != (4, 4) or not np.isfinite(transform).all():
+            raise ValueError("T_camera_from_world must be a finite 4x4 matrix")
+        camera_xyz = xyz @ transform[:3, :3].T + transform[:3, 3]
+        z = camera_xyz[:, 2]
+        valid = (
+            (pixels >= 0) & (pixels < height * width)
+            & np.isfinite(z) & (z > 0)
+        )
+        flat_depth = np.full(height * width, np.inf, dtype=np.float32)
+        np.minimum.at(flat_depth, pixels[valid], z[valid])
+        flat_valid = np.isfinite(flat_depth)
+        flat_depth[~flat_valid] = 0.0
+        depth = torch.from_numpy(flat_depth.reshape(1, height, width))
+        mask = torch.from_numpy(flat_valid.reshape(1, height, width))
+        return depth, mask
 
     def _load_target_reconstruction(self, ep_idx, frame_idx, input_point_count):
         value = self._read_sidecar(self.target_reconstruction_dir, ep_idx, frame_idx)
@@ -227,6 +272,54 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 raise ValueError(f"Dense polar array must be [4,H,W], got {value.shape}")
             return value.astype(np.float32)
         return dense_polar_from_bytes(value) if isinstance(value, bytes) else dense_polar_from_npz(value)
+
+    @staticmethod
+    def _viewing_directions(K: np.ndarray, height: int, width: int) -> np.ndarray:
+        """Build the SfP-Wild (+left, +down, +forward) unit ray image."""
+        K = np.asarray(K, dtype=np.float32)
+        if (K.shape != (3, 3) or not np.isfinite(K).all()
+                or K[0, 0] <= 0 or K[1, 1] <= 0):
+            raise ValueError("SfP intrinsics must be a finite 3x3 matrix with positive focal lengths")
+        rows, cols = np.meshgrid(
+            np.arange(height, dtype=np.float32),
+            np.arange(width, dtype=np.float32),
+            indexing="ij",
+        )
+        rays = np.stack((
+            (K[0, 2] - cols) / K[0, 0],
+            (rows - K[1, 2]) / K[1, 1],
+            np.ones((height, width), dtype=np.float32),
+        ))
+        rays /= np.linalg.norm(rays, axis=0, keepdims=True).clip(1e-8)
+        return rays.astype(np.float32)
+
+    def _load_sfp_inputs(self, ep_idx: int, frame_idx: int, dense_polar: np.ndarray) -> dict:
+        value = self._read_sidecar(self.sfp_input_dir, ep_idx, frame_idx)
+        source = io.BytesIO(value) if isinstance(value, bytes) else value
+        with np.load(source) as record:
+            i_un = np.asarray(record["I_un"])
+            K = np.asarray(record["K"], dtype=np.float32)
+            camera_from_world = np.asarray(record["T_camera_from_world"], dtype=np.float32)
+        if i_un.ndim != 2:
+            raise ValueError(f"SfP I_un must be HxW, got {i_un.shape}")
+        i_un = i_un.astype(np.float32) / 255.0 if i_un.dtype == np.uint8 else i_un.astype(np.float32)
+        if dense_polar.shape != (4, *i_un.shape):
+            raise ValueError(
+                f"SfP intensity and dense polar shapes differ: {i_un.shape} vs {dense_polar.shape}"
+            )
+        if camera_from_world.shape != (4, 4) or not np.isfinite(camera_from_world).all():
+            raise ValueError("T_camera_from_world must be a finite 4x4 matrix")
+        if not np.isfinite(i_un).all():
+            raise ValueError("SfP I_un contains non-finite values")
+        rays = self._viewing_directions(K, *i_un.shape)
+        polar_images = np.concatenate((i_un[None], dense_polar[:3], rays), axis=0)
+        return {
+            "polar_images": torch.from_numpy(polar_images[None].copy()),
+            "polar_K": torch.from_numpy(K[None].copy()),
+            "T_camera_from_world": torch.from_numpy(camera_from_world[None].copy()),
+            "view_valid": torch.ones(1, dtype=torch.bool),
+            "pixel_valid": torch.from_numpy((dense_polar[3:4] > 0.5).copy()),
+        }
 
     def set_feature_keys(
         self, video_keys=None, state_keys=None, action_keys=None,
@@ -266,6 +359,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         item, query_indices = self.query_action_chunk(item, idx, ep_idx, delta_indices)
         item = self.add_video_frames(item, ep_idx, query_indices)
         dense_polar = None
+        if self.sfp_input_dir is not None:
+            dense_polar = self._load_dense_polar(ep_idx, frame_idx)
+            item.update(self._load_sfp_inputs(ep_idx, frame_idx, dense_polar))
         if self.use_polar_material_conditioning:
             rgb_key = self.select_video_keys[0]
             if rgb_key not in item:
@@ -294,6 +390,21 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             self.apply_image_transforms(item, self.select_video_keys_for_vlm)
 
         point_cloud = self.load_point_cloud(ep_idx, frame_idx)
+        depth_point_pixels = None
+        if self.depth_point_pixel_dir is not None:
+            depth_point_pixels = self._load_point_pixels(
+                ep_idx, frame_idx, self.depth_point_pixel_dir
+            ).reshape(-1)
+            height, width = item["polar_images"].shape[-2:]
+            sparse_depth, sparse_depth_valid = self._rasterize_sparse_depth(
+                point_cloud,
+                depth_point_pixels,
+                item["T_camera_from_world"][0].numpy(),
+                height,
+                width,
+            )
+            item["observed_depth"] = sparse_depth.unsqueeze(0)
+            item["observed_depth_valid"] = sparse_depth_valid.unsqueeze(0)
         if self.target_reconstruction_dir is not None:
             target_points, target_mask = self._load_target_reconstruction(
                 ep_idx, frame_idx, len(point_cloud)
@@ -301,7 +412,11 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             item["target_points"] = torch.from_numpy(target_points)
             point_cloud = np.column_stack((point_cloud, target_mask)).astype(np.float32)
         if self.use_polar_material_conditioning:
-            point_pixels = self._load_point_pixels(ep_idx, frame_idx).reshape(-1)
+            point_pixels = (
+                depth_point_pixels
+                if depth_point_pixels is not None and self.point_pixel_dir == self.depth_point_pixel_dir
+                else self._load_point_pixels(ep_idx, frame_idx).reshape(-1)
+            )
             if len(point_pixels) != len(point_cloud):
                 raise ValueError("Point pixels and point cloud have different row counts")
             point_cloud = np.column_stack((point_cloud, point_pixels)).astype(np.float32)
@@ -496,5 +611,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 "polar_images", "polar_K", "T_camera_from_model", "T_model_from_world",
                 "view_valid", "pixel_valid", "polar_pixel_transform",
             ]
+        if "observed_depth" in item:
+            ordered_keys += ["observed_depth", "observed_depth_valid"]
         item = {key: item[key] for key in ordered_keys if key in item}
         return item

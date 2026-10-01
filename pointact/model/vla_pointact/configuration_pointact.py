@@ -50,6 +50,17 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         polar_max_tokens_per_group=32,
         polar_max_views=8,
         polar_writeback=False,
+        use_polar_depth_self_supervision=False,
+        polar_depth_loss_weight=0.1,
+        polar_consistency_weight=1.0,
+        sparse_depth_consistency_weight=1.0,
+        depth_smoothness_weight=0.01,
+        polar_refractive_index=1.5,
+        polar_min_dolp=0.02,
+        polar_dolp_weight=0.25,
+        polar_depth_keep_probability=0.7,
+        polar_depth_min=0.05,
+        polar_depth_max=4.5,
         use_polar_material_conditioning=False,
         use_target_reconstruction=False,
         target_reconstruction_weight=0.1,
@@ -104,6 +115,17 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.polar_max_tokens_per_group = polar_max_tokens_per_group
         self.polar_max_views = polar_max_views
         self.polar_writeback = polar_writeback
+        self.use_polar_depth_self_supervision = use_polar_depth_self_supervision
+        self.polar_depth_loss_weight = polar_depth_loss_weight
+        self.polar_consistency_weight = polar_consistency_weight
+        self.sparse_depth_consistency_weight = sparse_depth_consistency_weight
+        self.depth_smoothness_weight = depth_smoothness_weight
+        self.polar_refractive_index = polar_refractive_index
+        self.polar_min_dolp = polar_min_dolp
+        self.polar_dolp_weight = polar_dolp_weight
+        self.polar_depth_keep_probability = polar_depth_keep_probability
+        self.polar_depth_min = polar_depth_min
+        self.polar_depth_max = polar_depth_max
         if polar_enabled:
             if ptv3_backend != "concerto" or not ptv3_enc_mode:
                 raise ValueError("Polar joint attention supports only concerto encoder-only PointACT")
@@ -111,6 +133,12 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 raise ValueError("The supported stage mapping is exactly x1..x5")
             if polar_writeback:
                 raise ValueError("polar_writeback is not implemented; Polar query outputs are discarded")
+        if use_polar_depth_self_supervision and not polar_enabled:
+            raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
+        if not 0 < polar_depth_min < polar_depth_max:
+            raise ValueError("Expected 0 < polar_depth_min < polar_depth_max")
+        if not 0 < polar_depth_keep_probability < 1:
+            raise ValueError("polar_depth_keep_probability must be in (0,1)")
         self.use_polar_material_conditioning = use_polar_material_conditioning
         self.use_target_reconstruction = use_target_reconstruction
         self.target_reconstruction_weight = target_reconstruction_weight

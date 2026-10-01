@@ -725,7 +725,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                 if isinstance(module, SerializedAttentionWithAction):
                     module.copy_polar_qkv_()
 
-    def forward(self, data_dict, return_encoder=False):
+    def forward(self, data_dict, return_encoder=False, return_stage_points=False):
         """
         A data_dict is a dictionary containing properties of a batched point cloud.
         It should contain the following properties for PTv3:
@@ -741,7 +741,18 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
-        point = self.enc(point)
+        if return_stage_points:
+            stage_points = []
+            for stage in self.enc._modules.values():
+                point = stage(point)
+                stage_points.append({
+                    "feat": point.feat,
+                    "coord": point.coord,
+                    "batch": point.batch,
+                })
+            point.fused_stage_points = tuple(stage_points)
+        else:
+            point = self.enc(point)
         if return_encoder:
             return point
         if not self.enc_mode:

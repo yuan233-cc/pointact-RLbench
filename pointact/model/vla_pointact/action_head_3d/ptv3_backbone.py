@@ -236,7 +236,7 @@ class PointTransformerUnetWithAction(nn.Module):
     def forward(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_embeds, 
         time_embeds=None, point_condition=None, return_encoder_point=False,
-        polar_context=None,
+        polar_context=None, return_stage_points=False,
     ):
 
         ptv3_batch = self.prepare_ptv3_batch(
@@ -249,12 +249,21 @@ class PointTransformerUnetWithAction(nn.Module):
         # for k, v in ptv3_batch.items():
         #     if isinstance(v, torch.Tensor):
         #         print(k, v.size())
-        point_outs = self.ptv3_model(
-            ptv3_batch, return_encoder=self.auxiliary_decoder
-        ) if self.auxiliary_decoder else self.ptv3_model(ptv3_batch)
+        if self.auxiliary_decoder or return_stage_points:
+            point_outs = self.ptv3_model(
+                ptv3_batch,
+                return_encoder=self.auxiliary_decoder,
+                return_stage_points=return_stage_points,
+            )
+        else:
+            point_outs = self.ptv3_model(ptv3_batch)
         self.last_polar_route_stats = point_outs.get("polar_route_stats", None)
 
         action_out_embeds = point_outs.action_feat
         
         result = (point_outs.feat, point_outs.coord, point_outs.offset, action_out_embeds)
-        return (*result, point_outs) if return_encoder_point else result
+        if return_encoder_point:
+            result = (*result, point_outs)
+        if return_stage_points:
+            result = (*result, point_outs.fused_stage_points)
+        return result
