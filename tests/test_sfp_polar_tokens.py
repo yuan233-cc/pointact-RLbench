@@ -215,13 +215,13 @@ class JointAttentionTest(unittest.TestCase):
 
         torch.manual_seed(9)
         attention = SerializedAttentionWithAction(
-            8, 2, 2, attn_drop=0.0, proj_drop=0.0, enable_flash=False,
+            12, 2, 2, attn_drop=0.0, proj_drop=0.0, enable_flash=False,
             upcast_attention=False, upcast_softmax=False,
         )
         attention.configure_polar(0, neighbor_radius=0, max_tokens=8)
         attention.copy_polar_qkv_()
-        features = torch.randn(5, 8, requires_grad=True)
-        bank = torch.randn(2, 1, 8, 8, 8, requires_grad=True)
+        features = torch.randn(5, 12, requires_grad=True)
+        bank = torch.randn(2, 1, 8, 8, 12, requires_grad=True)
         point = self._point(features, bank, torch.ones(2, 1, dtype=torch.bool))
         output = attention(point)
         (output.feat.square().mean() + output.action_feat.square().mean()).backward()
