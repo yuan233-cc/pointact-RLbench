@@ -55,6 +55,7 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --per-device-train-batch-size "${PER_DEVICE_BATCH_SIZE:-8}" \
     --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS:-1}" \
     --learning-rate "${LEARNING_RATE:-1e-4}" --weight-decay 0.001 \
+    --optim "${OPTIM:-adamw_torch}" \
     --warmup-steps "${WARMUP_STEPS:-0.03}" --lr-scheduler-type cosine \
     --gradient-checkpointing "${GRADIENT_CHECKPOINTING:-False}" \
     --save-strategy steps --save-steps "${SAVE_STEPS:-500}" \
