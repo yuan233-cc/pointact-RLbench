@@ -93,9 +93,14 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
         if training_args.use_polar_depth_self_supervision:
             overrides.update(
                 polar_enabled=True,
+                polar_backbone=training_args.polar_backbone,
                 sfp_checkpoint=training_args.sfp_checkpoint,
                 sfp_freeze=training_args.sfp_freeze,
                 sfp_allow_random_init=training_args.sfp_allow_random_init,
+                cga_checkpoint=training_args.cga_checkpoint,
+                cga_freeze=training_args.cga_freeze,
+                cga_allow_random_init=training_args.cga_allow_random_init,
+                cga_residual_blocks=training_args.cga_residual_blocks,
                 use_polar_depth_self_supervision=True,
                 polar_depth_loss_weight=training_args.polar_depth_loss_weight,
                 polar_consistency_weight=training_args.polar_consistency_weight,

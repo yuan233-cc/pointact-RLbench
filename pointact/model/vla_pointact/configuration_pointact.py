@@ -42,10 +42,15 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         ptv3_input_channels=6,
         ptv3_backend="concerto",
         polar_enabled=False,
+        polar_backbone="sfp_wild",
         sfp_checkpoint=None,
         sfp_freeze=True,
         sfp_allow_random_init=False,
         sfp_feature_levels=("x1", "x2", "x3", "x4", "x5"),
+        cga_checkpoint=None,
+        cga_freeze=False,
+        cga_allow_random_init=False,
+        cga_residual_blocks=16,
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
@@ -107,10 +112,15 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.ptv3_apply_point_ca = ptv3_apply_point_ca
         self.ptv3_backend = ptv3_backend
         self.polar_enabled = polar_enabled
+        self.polar_backbone = polar_backbone
         self.sfp_checkpoint = sfp_checkpoint
         self.sfp_freeze = sfp_freeze
         self.sfp_allow_random_init = sfp_allow_random_init
         self.sfp_feature_levels = list(sfp_feature_levels)
+        self.cga_checkpoint = cga_checkpoint
+        self.cga_freeze = cga_freeze
+        self.cga_allow_random_init = cga_allow_random_init
+        self.cga_residual_blocks = cga_residual_blocks
         self.polar_neighbor_radius = polar_neighbor_radius
         self.polar_max_tokens_per_group = polar_max_tokens_per_group
         self.polar_max_views = polar_max_views
@@ -127,12 +137,20 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.polar_depth_min = polar_depth_min
         self.polar_depth_max = polar_depth_max
         if polar_enabled:
-            if ptv3_backend != "concerto" or not ptv3_enc_mode:
-                raise ValueError("Polar joint attention supports only concerto encoder-only PointACT")
+            if ptv3_backend not in ("concerto", "utonia") or not ptv3_enc_mode:
+                raise ValueError(
+                    "Polar joint attention supports concerto or utonia encoder-only PointACT"
+                )
+            if polar_backbone not in ("sfp_wild", "cga_transformer"):
+                raise ValueError(
+                    "polar_backbone must be 'sfp_wild' or 'cga_transformer'"
+                )
             if list(sfp_feature_levels) != ["x1", "x2", "x3", "x4", "x5"]:
                 raise ValueError("The supported stage mapping is exactly x1..x5")
             if polar_writeback:
                 raise ValueError("polar_writeback is not implemented; Polar query outputs are discarded")
+        if cga_residual_blocks < 0:
+            raise ValueError("cga_residual_blocks must be non-negative")
         if use_polar_depth_self_supervision and not polar_enabled:
             raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
         if not 0 < polar_depth_min < polar_depth_max:

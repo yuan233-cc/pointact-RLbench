@@ -21,6 +21,10 @@ from pointact.model.vla_pointact.action_head_3d.sfp_wild_encoder import (
     SfpWildFeatureEncoder,
     load_sfp_wild_checkpoint,
 )
+from pointact.model.vla_pointact.action_head_3d.cga_transformer_encoder import (
+    CgaTransformerFeatureEncoder,
+    load_cga_transformer_checkpoint,
+)
 from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision import (
     PolarDepthSelfSupervision,
     mask_points_at_depth_targets,
@@ -959,6 +963,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
 
         hidden_size = self.config.text_config.hidden_size
         max_action_dim = self.config.max_action_dim
+        polar_feature_channels = SfpWildFeatureEncoder.feature_channels
 
         self.ptv3_model = PointTransformerUnetWithAction(
             input_size=self.config.ptv3_input_channels, 
@@ -975,25 +980,37 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
             polar_enabled=self.config.polar_enabled,
-            sfp_feature_channels=SfpWildFeatureEncoder.feature_channels,
+            sfp_feature_channels=polar_feature_channels,
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
             polar_max_views=self.config.polar_max_views,
         )
         if self.config.polar_enabled:
-            if self.config.sfp_checkpoint is None and not self.config.sfp_allow_random_init:
-                raise ValueError(
-                    "polar_enabled=True requires sfp_checkpoint; set "
-                    "sfp_allow_random_init=True only for explicit from-scratch tests"
+            if self.config.polar_backbone == "sfp_wild":
+                if self.config.sfp_checkpoint is None and not self.config.sfp_allow_random_init:
+                    raise ValueError(
+                        "polar_backbone='sfp_wild' requires sfp_checkpoint; set "
+                        "sfp_allow_random_init=True only for explicit from-scratch tests"
+                    )
+                self.sfp_encoder = SfpWildFeatureEncoder()
+                # The self-supervised path obtains normals by differentiating its
+                # predicted depth. SfP-Wild's separate normal decoder is therefore
+                # kept out of the optimizer while its checkpoint still loads.
+                self.sfp_encoder.set_normal_decoder_trainable(False)
+            elif self.config.polar_backbone == "cga_transformer":
+                if self.config.cga_checkpoint is None and not self.config.cga_allow_random_init:
+                    raise ValueError(
+                        "polar_backbone='cga_transformer' requires cga_checkpoint; set "
+                        "cga_allow_random_init=True for an explicit from-scratch run"
+                    )
+                self.cga_encoder = CgaTransformerFeatureEncoder(
+                    residual_num=self.config.cga_residual_blocks
                 )
-            self.sfp_encoder = SfpWildFeatureEncoder()
-            # The self-supervised path obtains normals by differentiating its
-            # predicted depth. SfP-Wild's separate normal decoder is therefore
-            # kept out of the optimizer while its checkpoint still loads.
-            self.sfp_encoder.set_normal_decoder_trainable(False)
+            else:
+                raise ValueError(f"Unsupported polar_backbone={self.config.polar_backbone!r}")
         if self.config.use_polar_depth_self_supervision:
             self.polar_depth_self_supervision = PolarDepthSelfSupervision(
-                feature_channels=SfpWildFeatureEncoder.feature_channels,
+                feature_channels=polar_feature_channels,
                 point_feature_channels=tuple(self.config.ptv3_enc_channels),
                 min_depth=self.config.polar_depth_min,
                 max_depth=self.config.polar_depth_max,
@@ -1065,20 +1082,43 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 copy_qkv = getattr(module, "copy_polar_qkv_", None)
                 if copy_qkv is not None:
                     copy_qkv()
-        if self.config.polar_enabled and self.config.sfp_checkpoint is not None:
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "sfp_wild"
+            and self.config.sfp_checkpoint is not None
+        ):
             load_report = load_sfp_wild_checkpoint(
                 self.sfp_encoder, self.config.sfp_checkpoint
             )
             logger.info("Loaded SfP-Wild checkpoint: %s", load_report)
-        if self.config.polar_enabled and self.config.sfp_freeze:
-            self.sfp_encoder.requires_grad_(False)
-            self.sfp_encoder.eval()
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "cga_transformer"
+            and self.config.cga_checkpoint is not None
+        ):
+            load_report = load_cga_transformer_checkpoint(
+                self.cga_encoder, self.config.cga_checkpoint
+            )
+            logger.info("Loaded CGA-Transformer checkpoint: %s", load_report)
+        if self.config.polar_enabled and self._polar_encoder_frozen():
+            self._polar_encoder().requires_grad_(False)
+            self._polar_encoder().eval()
         nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
         self.to_float32_action_head()
 
+    def _polar_encoder(self):
+        if self.config.polar_backbone == "sfp_wild":
+            return self.sfp_encoder
+        return self.cga_encoder
+
+    def _polar_encoder_frozen(self):
+        if self.config.polar_backbone == "sfp_wild":
+            return self.config.sfp_freeze
+        return self.config.cga_freeze
+
     def to_float32_action_head(self):
         if self.config.polar_enabled:
-            self.sfp_encoder = self.sfp_encoder.to(dtype=torch.float32)
+            self._polar_encoder().to(dtype=torch.float32)
         if self.config.use_polar_depth_self_supervision:
             self.polar_depth_self_supervision = self.polar_depth_self_supervision.to(
                 dtype=torch.float32
@@ -1097,8 +1137,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.config.polar_enabled and self.config.sfp_freeze:
-            self.sfp_encoder.eval()
+        if self.config.polar_enabled and self._polar_encoder_frozen():
+            self._polar_encoder().eval()
         return self
 
     def _build_polar_context(self, batch_size, **kwargs):
@@ -1125,13 +1165,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             raise ValueError("T_camera_from_model must be [B,V,4,4]")
         if values["view_valid"].shape != (B, V):
             raise ValueError("view_valid must be [B,V]")
-        encoder_dtype = next(self.sfp_encoder.parameters()).dtype
+        encoder = self._polar_encoder()
+        encoder_dtype = next(encoder.parameters()).dtype
         flat_images = images.reshape(B * V, 7, height, width).to(encoder_dtype)
-        if self.config.sfp_freeze:
+        if self._polar_encoder_frozen():
             with torch.no_grad():
-                flat_levels = self.sfp_encoder.forward_features(flat_images)
+                flat_levels = encoder.forward_features(flat_images)
         else:
-            flat_levels = self.sfp_encoder.forward_features(flat_images)
+            flat_levels = encoder.forward_features(flat_images)
         levels = tuple(
             level.reshape(B, V, *level.shape[1:]) for level in flat_levels
         )
