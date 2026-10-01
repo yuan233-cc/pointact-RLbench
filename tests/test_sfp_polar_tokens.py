@@ -151,7 +151,7 @@ class JointAttentionTest(unittest.TestCase):
 
         return Point({
             "feat": features,
-            "action_feat": torch.randn(2, 3, 8),
+            "action_feat": torch.randn(2, 3, features.shape[-1]),
             "coord": torch.tensor([
                 [0.0, 0.0, 1.0], [0.1, 0.0, 1.0], [0.2, 0.0, 1.0],
                 [0.0, 0.0, 1.0], [0.1, 0.0, 1.0],
