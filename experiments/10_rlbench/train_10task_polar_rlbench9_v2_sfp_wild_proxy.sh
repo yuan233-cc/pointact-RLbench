@@ -50,7 +50,7 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --chunk-size 1 \
     --dataloader-num-workers "${DATALOADER_NUM_WORKERS:-8}" \
     --freeze-vision-tower True --freeze-llm True --freeze-merger True \
-    --bf16 True --tf32 True --fp16 False \
+    --bf16 "${BF16:-True}" --tf32 "${TF32:-True}" --fp16 "${FP16:-False}" \
     --num-train-epochs "${EPOCHS:-1000}" --max-steps "${MAX_STEPS:-40000}" \
     --per-device-train-batch-size "${PER_DEVICE_BATCH_SIZE:-8}" \
     --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS:-1}" \
@@ -59,7 +59,8 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --gradient-checkpointing "${GRADIENT_CHECKPOINTING:-False}" \
     --save-strategy steps --save-steps "${SAVE_STEPS:-500}" \
     --save-total-limit "${SAVE_TOTAL_LIMIT:-10}" --logging-steps "${LOGGING_STEPS:-3}" \
-    --report-to "${REPORT_TO:-tensorboard}" --attn-implementation flash_attention_2 \
+    --report-to "${REPORT_TO:-tensorboard}" \
+    --attn-implementation "${ATTN_IMPLEMENTATION:-flash_attention_2}" \
     --color_aug False --image_aug False --max_grad_norm 3 \
     --use_robot_state True --ctx_embed_size 512 \
     --ptv3_backend concerto --ptv3_patch_size 1024 --ptv3_enc_mode True \
