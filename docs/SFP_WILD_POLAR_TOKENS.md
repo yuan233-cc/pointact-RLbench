@@ -4,9 +4,9 @@ This is an experimental extension, not a structure claimed by the PointACT or
 SfP-Wild papers. The original PointACT path remains the default
 (`polar_enabled=false`).
 
-The implemented path is intentionally limited to
-`VLAEncDec3DWithActionRegressionModel`, the Concerto backend, and encoder-only
-PTv3. Unsupported combinations fail during configuration/model construction.
+The implemented path is limited to
+`VLAEncDec3DWithActionRegressionModel`, the Concerto or Utonia backend, and
+encoder-only PTv3. Unsupported combinations fail during model construction.
 
 ## Input contract
 
@@ -49,6 +49,11 @@ the seven-channel Polar tensor.
 --polar_max_views 8
 --polar_writeback false
 ```
+
+Select the point backbone with `--ptv3_backend concerto` or
+`--ptv3_backend utonia`. Utonia retains its 3D rotary encoding for point
+queries and keys; projected Polar tokens use their normalized image location,
+camera-view embedding, and modality embedding.
 
 The official checkpoint link is in the SfP-Wild README. A missing checkpoint
 is an error. `sfp_allow_random_init=true` exists only for explicit from-scratch

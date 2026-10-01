@@ -148,8 +148,8 @@ class PointTransformerUnetWithAction(nn.Module):
 
         if auxiliary_decoder and (not enc_mode or ptv3_backend != "concerto"):
             raise ValueError("Auxiliary decoder requires the concerto encoder-only action backbone")
-        if polar_enabled and ptv3_backend != "concerto":
-            raise ValueError("Polar joint attention requires the concerto PTv3 backend")
+        if polar_enabled and ptv3_backend not in {"concerto", "utonia"}:
+            raise ValueError("Polar joint attention requires a supported PTv3 backend")
         if polar_enabled and not enc_mode:
             raise ValueError("Polar joint attention currently requires ptv3_enc_mode=True")
         ptv3_model_cls = get_ptv3_model_cls(ptv3_backend, with_action=True)

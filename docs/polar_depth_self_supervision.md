@@ -82,6 +82,12 @@ SFP_CHECKPOINT=/path/to/onlyiun_pol_vd_checkpoint \
 bash experiments/10_rlbench/train_10task_polar_rlbench9_v2_sfp_wild_proxy.sh
 ```
 
+Set `PTV3_BACKEND=utonia` and `PTV3_INIT_CKPT_FILE` to the Utonia checkpoint
+to use Utonia's native 54/108/216/432/576 channel widths and
+3/6/12/24/32 attention heads. The same fused stage maps feed the dense depth
+decoder, so the reconstruction loss still updates Polar-to-point attention
+and the completion feature still conditions the action tokens.
+
 Useful environment overrides are:
 
 ```text

@@ -208,6 +208,27 @@ class JointAttentionTest(unittest.TestCase):
             self.assertIsNotNone(gradient)
             self.assertTrue(torch.isfinite(gradient).all())
 
+    def test_utonia_polar_path_preserves_rope_and_has_finite_gradients(self):
+        from pointact.model.ptv3.utonia.model_ca_action import (
+            SerializedAttentionWithAction,
+        )
+
+        torch.manual_seed(9)
+        attention = SerializedAttentionWithAction(
+            8, 2, 2, attn_drop=0.0, proj_drop=0.0, enable_flash=False,
+            upcast_attention=False, upcast_softmax=False,
+        )
+        attention.configure_polar(0, neighbor_radius=0, max_tokens=8)
+        attention.copy_polar_qkv_()
+        features = torch.randn(5, 8, requires_grad=True)
+        bank = torch.randn(2, 1, 8, 8, 8, requires_grad=True)
+        point = self._point(features, bank, torch.ones(2, 1, dtype=torch.bool))
+        output = attention(point)
+        (output.feat.square().mean() + output.action_feat.square().mean()).backward()
+        for gradient in (features.grad, bank.grad, attention.polar_qkv.weight.grad):
+            self.assertIsNotNone(gradient)
+            self.assertTrue(torch.isfinite(gradient).all())
+
     def test_unfrozen_sfp_adapter_and_polar_qkv_receive_action_gradient(self):
         from pointact.model.ptv3.concerto.model_ca_action import (
             PolarStagePreparation,

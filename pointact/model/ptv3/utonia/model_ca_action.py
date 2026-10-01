@@ -18,6 +18,7 @@ from .model import (
 )
 from .model_ca import CABlock, PointTransformerV3CA
 from .utils import offset2bincount
+from pointact.model.vla_pointact.action_head_3d.polar_router import PolarTokenRouter
 
 
 class GridPoolingWithAction(GridPooling):
@@ -84,7 +85,146 @@ class GridUnpoolingWithAction(GridUnpooling):
 
 
 class SerializedAttentionWithAction(SerializedAttention):
+    def configure_polar(
+        self,
+        stage_index,
+        neighbor_radius=1,
+        max_tokens=32,
+        max_views=8,
+    ):
+        self.polar_enabled = True
+        self.polar_router = PolarTokenRouter(
+            level=stage_index,
+            neighbor_radius=neighbor_radius,
+            max_tokens=max_tokens,
+        )
+        self.polar_norm = nn.LayerNorm(self.channels)
+        self.polar_position = nn.Linear(2, self.channels)
+        self.polar_view_embedding = nn.Embedding(max_views, self.channels)
+        self.polar_modality_embedding = nn.Parameter(torch.zeros(self.channels))
+        self.polar_qkv = nn.Linear(
+            self.channels, self.channels * 3, bias=self.qkv.bias is not None
+        )
+
+    @torch.no_grad()
+    def copy_polar_qkv_(self):
+        if getattr(self, "polar_enabled", False):
+            self.polar_qkv.weight.copy_(self.qkv.weight)
+            if self.qkv.bias is not None:
+                self.polar_qkv.bias.copy_(self.qkv.bias)
+
+    def _reference_joint_attention(self, qkv):
+        q, k, v = qkv.permute(1, 2, 0, 3).unbind(0)
+        if self.upcast_attention:
+            q, k = q.float(), k.float()
+        attn = (q * self.scale) @ k.transpose(-2, -1)
+        if self.upcast_softmax:
+            attn = attn.float()
+        attn = self.softmax(attn)
+        attn = self.attn_drop(attn).to(qkv.dtype)
+        return (attn @ v).transpose(0, 1).reshape(-1, self.channels)
+
+    def _forward_polar(self, point):
+        bincount = offset2bincount(point.offset)
+        if not self.enable_flash:
+            self.patch_size = min(bincount.min().tolist(), self.patch_size_max)
+        heads, channels = self.num_heads, self.channels
+        pad, unpad, original_cu = self.get_padding_and_inverse(point)
+        group_lengths = torch.diff(original_cu)
+        order = point.serialized_order[self.order_index][pad]
+        inverse = unpad[point.serialized_inverse[self.order_index]]
+
+        point_qkv = self.qkv(point.feat)[order].reshape(
+            -1, 3, heads, channels // heads
+        )
+        q, k, v = point_qkv.unbind(dim=1)
+        q, k = self.rope(q, k, point.coord[order].clone())
+        point_qkv = torch.stack((q, k, v), dim=1)
+        point_qkv = torch.split(
+            point_qkv, group_lengths.detach().cpu().tolist(), dim=0
+        )
+
+        num_actions = point.action_feat.size(1)
+        repeat_size = torch.div(
+            bincount + self.patch_size - 1,
+            self.patch_size,
+            rounding_mode="trunc",
+        )
+        action_qkv = self.qkv(point.action_feat).reshape(
+            -1, num_actions, 3, heads, channels // heads
+        )
+        action_qkv = action_qkv.repeat_interleave(repeat_size, dim=0)
+        routes = self.polar_router(point, order, group_lengths)
+        if len(routes) != len(point_qkv) or len(routes) != len(action_qkv):
+            raise RuntimeError("Polar routes and serialized groups have different lengths")
+
+        packed_qkv, lengths = [], []
+        for group_point_qkv, group_action_qkv, route in zip(
+            point_qkv, action_qkv, routes
+        ):
+            polar = route.features
+            if len(polar):
+                if int(route.view_ids.max().item()) >= self.polar_view_embedding.num_embeddings:
+                    raise ValueError("Number of Polar views exceeds polar_max_views")
+                polar = polar + self.polar_position(route.xy)
+                polar = polar + self.polar_view_embedding(route.view_ids)
+                polar = polar + self.polar_modality_embedding
+                polar_qkv = self.polar_qkv(self.polar_norm(polar)).reshape(
+                    -1, 3, heads, channels // heads
+                )
+            else:
+                polar_qkv = group_point_qkv.new_empty(
+                    (0, 3, heads, channels // heads)
+                )
+            sequence = torch.cat(
+                (group_action_qkv, group_point_qkv, polar_qkv), dim=0
+            )
+            packed_qkv.append(sequence)
+            lengths.append(len(sequence))
+
+        if self.enable_flash:
+            qkv = torch.cat(packed_qkv, dim=0)
+            attention_dtype = (
+                qkv.dtype
+                if qkv.dtype in (torch.float16, torch.bfloat16)
+                else torch.float16
+            )
+            cumulative = torch.tensor(
+                [0, *torch.tensor(lengths).cumsum(0).tolist()],
+                device=qkv.device,
+                dtype=torch.int32,
+            )
+            output = flash_attn.flash_attn_varlen_qkvpacked_func(
+                qkv.to(attention_dtype),
+                cumulative,
+                max_seqlen=max(lengths),
+                dropout_p=self.attn_drop if self.training else 0,
+                softmax_scale=self.scale,
+            ).reshape(-1, channels).to(qkv.dtype)
+            group_outputs = torch.split(output, lengths, dim=0)
+        else:
+            group_outputs = [
+                self._reference_joint_attention(qkv) for qkv in packed_qkv
+            ]
+
+        action_outputs, point_outputs = [], []
+        for output, point_part in zip(group_outputs, point_qkv):
+            action_outputs.append(output[:num_actions])
+            point_outputs.append(output[num_actions : num_actions + len(point_part)])
+        action_feat = torch.stack(action_outputs, dim=0)
+        action_feat = torch.split(
+            action_feat, repeat_size.detach().cpu().tolist(), dim=0
+        )
+        action_feat = torch.stack([value.mean(0) for value in action_feat], dim=0)
+        feat = torch.cat(point_outputs, dim=0)[inverse]
+
+        point.feat = self.proj_drop(self.proj(feat))
+        point.action_feat = self.proj_drop(self.proj(action_feat))
+        return point
+
     def forward(self, point):
+        if getattr(self, "polar_enabled", False):
+            return self._forward_polar(point)
         bincount = offset2bincount(point.offset)
 
         if not self.enable_flash:
@@ -231,6 +371,11 @@ class BlockWithAction(Block):
         shift_coords=None,
         jitter_coords=None,
         rescale_coords=None,
+        polar_enabled=False,
+        polar_stage_index=None,
+        polar_neighbor_radius=1,
+        polar_max_tokens=32,
+        polar_max_views=8,
     ):
         super().__init__(
             channels=channels,
@@ -258,6 +403,13 @@ class BlockWithAction(Block):
             rescale_coords=rescale_coords,
             attn_class=SerializedAttentionWithAction,
         )
+        if polar_enabled:
+            self.attn.configure_polar(
+                polar_stage_index,
+                neighbor_radius=polar_neighbor_radius,
+                max_tokens=polar_max_tokens,
+                max_views=polar_max_views,
+            )
 
         self.action_proj = nn.Linear(channels, channels)
         self.action_norm0 = norm_layer(channels)
@@ -372,6 +524,27 @@ class CABlockWithAction(CABlock):
         return point
 
 
+class PolarStagePreparation(PointModule):
+    """Project one SfP feature level once for all attention blocks in a stage."""
+
+    def __init__(self, input_channels, output_channels, stage_index):
+        super().__init__()
+        self.stage_index = stage_index
+        self.adapter = nn.Linear(input_channels, output_channels)
+        self.norm = nn.LayerNorm(output_channels)
+
+    def forward(self, point):
+        levels = point.polar_feature_levels
+        if len(levels) != 5:
+            raise ValueError("polar_feature_levels must contain x1..x5")
+        feature = levels[self.stage_index]
+        if feature.ndim != 5:
+            raise ValueError("Each Polar feature level must be [B,V,C,H,W]")
+        feature = feature.permute(0, 1, 3, 4, 2)
+        point.polar_features = self.norm(self.adapter(feature))
+        return point
+
+
 class PointTransformerV3CAWithAction(PointTransformerV3CA):
     def __init__(
         self,
@@ -410,6 +583,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         shift_coords=None,
         jitter_coords=None,
         rescale_coords=None,
+        polar_enabled=False,
+        sfp_feature_channels=(64, 128, 256, 512, 512),
+        polar_neighbor_radius=1,
+        polar_max_tokens_per_group=32,
+        polar_max_views=8,
     ):
         PointModule.__init__(self)
 
@@ -418,6 +596,12 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         self.enc_mode = enc_mode
         self.shuffle_orders = shuffle_orders
         self.freeze_encoder = freeze_encoder
+
+        if polar_enabled and not enc_mode:
+            raise ValueError("Polar joint attention currently supports encoder-only PointACT")
+        if len(sfp_feature_channels) != self.num_stages:
+            raise ValueError("SfP feature levels must match the number of PTv3 encoder stages")
+        self.polar_enabled = polar_enabled
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -460,6 +644,15 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                     ),
                     name="down",
                 )
+            if polar_enabled:
+                enc.add(
+                    PolarStagePreparation(
+                        input_channels=sfp_feature_channels[s],
+                        output_channels=enc_channels[s],
+                        stage_index=s,
+                    ),
+                    name="polar_prepare",
+                )
             for i in range(enc_depths[s]):
                 enc.add(
                     BlockWithAction(
@@ -486,6 +679,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         shift_coords=shift_coords,
                         jitter_coords=jitter_coords,
                         rescale_coords=rescale_coords,
+                        polar_enabled=polar_enabled,
+                        polar_stage_index=s,
+                        polar_neighbor_radius=polar_neighbor_radius,
+                        polar_max_tokens=polar_max_tokens_per_group,
+                        polar_max_views=polar_max_views,
                     ),
                     name=f"block{i}",
                 )
@@ -586,15 +784,36 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
             for p in self.enc.parameters():
                 p.requires_grad = False
         self.apply(self._init_weights)
+        if polar_enabled:
+            for module in self.modules():
+                if isinstance(module, SerializedAttentionWithAction):
+                    module.copy_polar_qkv_()
 
-    def forward(self, data_dict):
+    def forward(self, data_dict, return_encoder=False, return_stage_points=False):
         point = Point(data_dict)
         point = self.embedding(point)
+        if "point_condition" in data_dict:
+            point.feat = point.feat + data_dict["point_condition"].to(point.feat.dtype)
 
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
-        point = self.enc(point)
+        if return_stage_points:
+            stage_points = []
+            for stage in self.enc._modules.values():
+                point = stage(point)
+                stage_points.append(
+                    {
+                        "feat": point.feat,
+                        "coord": point.coord,
+                        "batch": point.batch,
+                    }
+                )
+            point.fused_stage_points = tuple(stage_points)
+        else:
+            point = self.enc(point)
+        if return_encoder:
+            return point
         if not self.enc_mode:
             point = self.dec(point)
         return point

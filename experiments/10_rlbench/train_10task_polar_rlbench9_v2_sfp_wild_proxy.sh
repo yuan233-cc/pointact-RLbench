@@ -26,7 +26,24 @@ else
     echo "Set SFP_CHECKPOINT to the official onlyiun_pol_vd checkpoint, or explicitly set SFP_ALLOW_RANDOM_INIT=True and SFP_FREEZE=False." >&2
     exit 2
 fi
-ptv3_checkpoint="${PTV3_INIT_CKPT_FILE:-$repo_root/pretrained/Pointcept-Concerto/concerto_large.pth}"
+ptv3_backend="${PTV3_BACKEND:-concerto}"
+case "$ptv3_backend" in
+    concerto)
+        ptv3_default_checkpoint="$repo_root/pretrained/Pointcept-Concerto/concerto_large.pth"
+        ptv3_channels=(64 128 256 512 768)
+        ptv3_heads=(4 8 16 32 48)
+        ;;
+    utonia)
+        ptv3_default_checkpoint="$repo_root/pretrained/Pointcept-Utonia/utonia.pth"
+        ptv3_channels=(54 108 216 432 576)
+        ptv3_heads=(3 6 12 24 32)
+        ;;
+    *)
+        echo "Unsupported PTV3_BACKEND=$ptv3_backend (expected concerto or utonia)." >&2
+        exit 2
+        ;;
+esac
+ptv3_checkpoint="${PTV3_INIT_CKPT_FILE:-$ptv3_default_checkpoint}"
 if [[ ! -f "$ptv3_checkpoint" ]]; then
     echo "PTv3 initialization checkpoint does not exist: $ptv3_checkpoint" >&2
     exit 2
@@ -64,9 +81,9 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --attn-implementation "${ATTN_IMPLEMENTATION:-flash_attention_2}" \
     --color_aug False --image_aug False --max_grad_norm 3 \
     --use_robot_state True --ctx_embed_size 512 \
-    --ptv3_backend concerto --ptv3_patch_size 1024 --ptv3_enc_mode True \
-    --ptv3_enc_channels 64 128 256 512 768 \
-    --ptv3_enc_depths 3 3 3 12 3 --ptv3_enc_num_head 4 8 16 32 48 \
+    --ptv3_backend "$ptv3_backend" --ptv3_patch_size 1024 --ptv3_enc_mode True \
+    --ptv3_enc_channels "${ptv3_channels[@]}" \
+    --ptv3_enc_depths 3 3 3 12 3 --ptv3_enc_num_head "${ptv3_heads[@]}" \
     --ptv3_input_channels 9 --ptv3_init_copy_input_channels 6 \
     --ptv3_apply_point_ca False --ptv3_init_ckpt_file "$ptv3_checkpoint" \
     --action_regression_loss l2 --action_head_pos_center zero \
