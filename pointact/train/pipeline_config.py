@@ -55,6 +55,17 @@ class TrainPipelineConfig(TrainingArguments):
     ptv3_apply_point_ca: bool = field(default=True)
     ptv3_input_channels: int = field(default=6)
     ptv3_backend: str = field(default="concerto")
+    polar_enabled: bool = field(default=False)
+    sfp_checkpoint: str | None = field(default=None)
+    sfp_freeze: bool = field(default=True)
+    sfp_allow_random_init: bool = field(default=False)
+    sfp_feature_levels: List[str] = field(
+        default_factory=lambda: ["x1", "x2", "x3", "x4", "x5"]
+    )
+    polar_neighbor_radius: int = field(default=1)
+    polar_max_tokens_per_group: int = field(default=32)
+    polar_max_views: int = field(default=8)
+    polar_writeback: bool = field(default=False)
     use_polar_material_conditioning: bool = field(default=False)
     use_target_reconstruction: bool = field(default=False)
     target_reconstruction_weight: float = field(default=0.1)

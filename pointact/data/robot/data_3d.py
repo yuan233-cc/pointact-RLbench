@@ -397,6 +397,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         return self._point_cloud_lmdb_txn
 
     def augment_point_cloud(self, point_cloud: np.ndarray, item: dict):
+        model_from_world = (
+            np.eye(4, dtype=np.float32) if "polar_images" in item else None
+        )
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
@@ -429,6 +432,12 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
         if self.augment_pc_rot != 0:
             angle = np.random.uniform(-1, 1) * np.deg2rad(self.augment_pc_rot)
+            cosine, sine = np.cos(angle), np.sin(angle)
+            if model_from_world is not None:
+                model_from_world[:3, :3] = np.asarray(
+                    [[cosine, -sine, 0], [sine, cosine, 0], [0, 0, 1]],
+                    dtype=np.float32,
+                )
             point_cloud[:, :3] = random_rotate_point_around_z(point_cloud[:, :3], angle=angle)
             if "target_points" in item:
                 item["target_points"] = random_rotate_point_around_z(
@@ -445,6 +454,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 else:
                     item[ACTION][:, 3:7] = random_rotate_quat_around_z(item[ACTION][:, 3:7], angle)
 
+        if model_from_world is not None:
+            item["T_model_from_world"] = torch.from_numpy(model_from_world)
         return point_cloud
 
     def center_point_cloud(self, point_cloud: np.ndarray, item: dict):
@@ -456,6 +467,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             if not self.is_delta_action:
                 item[ACTION][:, :3] = item[ACTION][:, :3] - point_center[None, :]
         item[f"{OBS_POINTS}.center"] = point_center
+        if "polar_images" in item:
+            if "T_camera_from_world" not in item:
+                raise ValueError(
+                    "Polar-token training samples require T_camera_from_world so random "
+                    "rotation/centering can be composed exactly"
+                )
+            if "T_model_from_world" not in item:
+                item["T_model_from_world"] = torch.eye(4, dtype=point_center.dtype)
+            item["T_model_from_world"] = item["T_model_from_world"].clone()
+            item["T_model_from_world"][:3, 3] = -point_center
+            camera_from_world = torch.as_tensor(item["T_camera_from_world"], dtype=torch.float32)
+            item["T_camera_from_model"] = camera_from_world @ torch.linalg.inv(
+                item["T_model_from_world"]
+            ).unsqueeze(0)
         if "target_points" in item:
             item["target_points"] = item["target_points"] - point_center
         return point_cloud
@@ -466,5 +491,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             ordered_keys += ["material_rgb", "polar_dense", "material_candidates", "point_pixel_indices"]
         if self.target_reconstruction_dir is not None:
             ordered_keys += ["target_points", "target_input_mask"]
+        if "polar_images" in item:
+            ordered_keys += [
+                "polar_images", "polar_K", "T_camera_from_model", "T_model_from_world",
+                "view_valid", "pixel_valid", "polar_pixel_transform",
+            ]
         item = {key: item[key] for key in ordered_keys if key in item}
         return item

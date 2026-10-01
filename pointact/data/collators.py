@@ -135,4 +135,21 @@ class DataCollator(DefaultDataCollator):
             data_dict["material_candidates"] = candidates
             data_dict["material_candidate_mask"] = mask
 
+        has_polar = ["polar_images" in example for example in examples]
+        if any(has_polar) and not all(has_polar):
+            raise ValueError("Cannot mix Polar-token and baseline examples in one batch")
+        if all(has_polar):
+            required = ("polar_images", "polar_K", "T_camera_from_model", "view_valid")
+            optional = ("T_model_from_world", "pixel_valid", "polar_pixel_transform")
+            for key in required:
+                if any(key not in example for example in examples):
+                    raise ValueError(f"Polar-token examples require {key}")
+                data_dict[key] = torch.stack([example[key] for example in examples])
+            for key in optional:
+                present = [key in example for example in examples]
+                if any(present) and not all(present):
+                    raise ValueError(f"Cannot mix examples with and without {key}")
+                if all(present):
+                    data_dict[key] = torch.stack([example[key] for example in examples])
+
         return data_dict

@@ -460,6 +460,23 @@ class GridPooling(PointModule):
             point_dict["context_offset"] = point.context_offset
         if "action_feat" in point.keys():
             point_dict["action_feat"] = point.action_feat
+        # Observation-level Polar banks and calibration are shared metadata,
+        # not per-point tensors. Preserve them unchanged across every pooling
+        # stage so each serialized block can reroute using its current points.
+        for key in (
+            "polar_feature_levels",
+            "polar_features",
+            "polar_K",
+            "T_camera_from_model",
+            "T_model_from_world",
+            "view_valid",
+            "pixel_valid",
+            "polar_image_hw",
+            "polar_pixel_transform",
+            "polar_route_stats",
+        ):
+            if key in point.keys():
+                point_dict[key] = point[key]
         if "name" in point.keys():
             point_dict["name"] = point.name
         if "split" in point.keys():

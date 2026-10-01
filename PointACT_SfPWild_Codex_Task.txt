@@ -1,0 +1,90 @@
+请在当前 PointACT 仓库实际实现以下改造。先读 AGENTS.md、检查版本和调用链，再修改、验证。不要仅输出建议。
+
+目标：以 SfP-Wild 的五尺度二维偏振特征作为外部特征库，在 PointACT 每个点云 attention block 中按当前组的三维点投影选择 Polar tokens，拼接 [action/state, point, polar] 后计算组内非因果联合 self-attention。
+此设计尚未做效果验证，不是 PointACT 或 SfP-Wild 原论文已有结构。
+
+已检查的 PointACT 官方版本：
+https://github.com/cshizhe/robot-PointAct
+commit ab6429d00860b1cbd74b6edeef9b898e9c28a602
+SfP-Wild 官方仓库：https://github.com/ChenyangLEI/sfp-wild
+优先实现 concerto backend、VLAEncDec3DWithActionRegressionModel、encoder-only；其他配置不得静默运行不正确的 Polar 路径。保留原 baseline 路径。
+
+1. 原模型事实与改造边界
+SerializedAttentionWithAction 位于 pointact/model/ptv3/concerto/model_ca_action.py。
+原实现为每组复制同一样本的 action tokens，在 [action,point] 上 attention；点结果通过 inverse 恢复顺序；action 结果在同样本组之间等权平均。
+use_robot_state=True 时 action_feat 的第一个 token 是 state token，在动作头前才移除。不得改变它。
+每个 BlockWithAction 后有 CABlockWithAction；即便 apply_point_ca=False，动作到 VLM context 的 attention 仍存在。
+保留原 CPE、点/动作 residual、FFN、VLM context、动作头、action loss 和现有辅助重建分支。点输入保持六维 XYZ+RGB，不同步扩成九维。
+
+2. SfP-Wild 特征库
+复核 models/transunet.py、utils/train_util.py 和官方 reproduce_full_model_infer.sh。
+官方 onlyiun_pol_vd 配置为七通道 [I_un,DoLP,cos(2AoLP),sin(2AoLP),vx,vy,vz]。
+严格匹配原预处理的单位、强度归一化、通道次序和 viewing direction 坐标约定。
+根据用户 Polar 相机 K 和实际图像几何生成观察方向；不要复制官方 vd_local.npy。
+checkpoint 链接在官方 README 中；已知存在链接，但尚未下载验证。实际加载需核对配置/state_dict，不得声称已成功加载；如访问不到，实现可配置路径并报告还缺权重，不假装随机初始化是预训练。
+封装 forward_features()，保留 inc、down1~down4、resblock_layers（Transformer），不执行 up1~up4/outc。
+返回 x1:64,H,W；x2:128,H/2,W/2；x3:256,H/4,W/4；x4:512,H/8,W/8；x5:512,H/16,W/16（x5 在 Transformer 后）。这是默认结构，实测 odd size/padding 等形状。
+一次 observation forward 计算一次五尺度特征。冻结参数时显式控制 eval/归一化行为，不把上一训练 batch 的有梯度特征缓存到下一 batch。
+
+3. 五阶段映射
+PointACT stage s=0..4 分别读取 x1..x5。
+默认官方 LIBERO Concerto 通道 [64,128,256,512,768]、depths [3,3,3,12,3]；从实际 config 读取，不硬编码。
+各 stage 新增 Linear(C_sfp,C_point)+LayerNorm；同一 stage 的 blocks 共享该尺度特征库，按自己分组读取。
+阶段对应不是感受野一致；深层 x5 已包含 Transformer 上下文，因此“局部选择”约束的是 token 位置，不是严格限制信息感受野。
+
+4. 数据契约与坐标
+输入 polar_images [B,V,7,H,W]（或三通道P、I_un、ray 分别传入再拼接），polar_K [B,V,3,3]，T_camera_from_model [B,V,4,4]，view_valid [B,V]，pixel_valid 可选。
+初版 V=1，但接口可扩展。真实 calibration 缺失不得静默填单位矩阵；必须提供真实标定，或者显式关闭 Polar。
+原 PointACT 会随机旋转和中心化。记录完整 T_model_from_world；使用 T_camera_from_model=T_camera_from_world @ inverse(T_model_from_world)。
+若 x_model=R_aug*x_world-c_aug，则 T_model_from_world=[R_aug,-c_aug;0,1]。
+对每层 pooling 后的模型坐标也使用这一变换。
+Polar resize/crop/pad 要同步 K 或像素仿射矩阵；先去畸变或实现畸变模型。首版不做 Polar 图像旋转/翻转，避免 AoLP 方向增强错误。
+RGB color augmentation 不得作用于偏振或 ray 通道。
+dataset post_process allowlist、dataset.py、collator、训练 forward、compute_action_loss、compute_action、sample_actions、推理 processor/server 全链路显式传递。
+GridPooling 重新构造 Point 字典，必须继续传递 Polar bank/calibration/masks metadata；也可以采用独立上下文传递，不能静默丢字段。
+
+5. 每个 block 的分组路由
+复用 order=point.serialized_order[self.order_index][pad]、inverse 和 cu_seqlens。不得另造不一致分组。
+用真实组点建立几何候选，去重 padding 复制的点；原 point attention 的 padding 行为保持原状。
+x_cam=T_camera_from_model*x_model；筛选 finite、Z>epsilon 和相机视野内点；用 K 投影到 Polar 图，再转换到所选 SfP 特征网格。
+精确推导卷积/MaxPool 的有效 stride 与像素中心 offset；不用未经核实的 u/scale 代替严格坐标约定。写合成测试和真实 overlay。
+候选为最近特征格加半径1邻域，按 (view,row,col) union/去重。不要把全部点的巨大矩形包围框填满。
+每组最多32个 tokens（config 可设16/32/64）；超出则确定性空间覆盖采样，避免总取左上角；多相机需合理分配预算。
+不足32保留实际数量，M_g=0 时直接使用 [action,point]。不用虚假零 token 或复制真实 token 凑数。
+每个 block 按实际分组更新路由。geometry cache 必须对 sample、camera、augmentation、stage、order 和组边界有效。
+用粗点 centroid 路由是近似；记录覆盖率。子点 footprint union 可作为后续功能，不是首版必要条件。
+
+6. 联合 attention 与输出
+组序列 [A_b,X_g,Z_g]，长度 L_g=A+K_g+M_g，全部有效 tokens 非因果互注意。
+保留原 point/action QKV 与参数名；新增 polar_qkv（可复制对应原 qkv 初始化），Polar 有单独 norm。加入二维位置表示，可选 view/modality embedding；不伪造三维深度或将Polar混进点CPE。
+Flash packed qkv 按组拼接，cu_seqlens=int32([0,cumsum(L_g)])，max_seqlen=max(L_g)。几何运算 fp32，attention dtype 跟现有实现兼容。
+精确拆分：前A为动作；随后K_g为点；最后M_g为Polar。
+动作仍在同一样本的所有组内等权平均，然后执行原 proj/residual/action FFN；点恢复 inverse 后进入原路径。
+Polar query 输出首版丢弃，不回写二维网格，不跨层传播更新后的 Polar stream。下个 block 再读 SfP 特征库。Polar K/V 路径仍对 SfP encoder 有梯度。
+不再额外加 point-polar cross-attention，以免改变用户指定的拼接方案。
+非Flash正确处理可变长度与mask，reference可以逐组计算。不支持的纯点 RPE 或 Utonia 3D RoPE 分支要明确限制，不静默错误运行。
+Polar特征乘零不等于 baseline（softmax分母变了）；baseline 使用 polar_enabled=False 或真正移除所有 Polar tokens。
+
+7. 配置起点
+polar_enabled, sfp_checkpoint, sfp_freeze, sfp_feature_levels=[x1,x2,x3,x4,x5], polar_neighbor_radius=1, polar_max_tokens_per_group=32, polar_writeback=False。
+优先冻结SfP训练新增模块和现有可训练PointACT参数；之后再做小学习率解冻对照。冻结时处理好所有BN/IN等模式。
+旧 checkpoint 缺失参数只允许新增 Polar 模块；报告 missing/unexpected keys，不能用 strict=False 隐藏原模块漏加载。
+
+8. 文件建议
+新增 pointact/model/vla_pointact/action_head_3d/sfp_wild_encoder.py
+新增 pointact/model/vla_pointact/action_head_3d/polar_router.py
+修改 concerto/model_ca_action.py、ptv3_backbone.py、modeling_vla_pointact.py、configuration_pointact.py。
+修改 pooling metadata 路径及完整数据/推理链。查找训练参数定义并接通 CLI。
+引入上游代码时保留其 LICENSE/署名要求。
+
+9. 必须测试和交付
+- 禁用 Polar 时 eval baseline 数值等价。
+- 相机投影覆盖中心化、旋转增强、crop/resize、图像外、Z<=0。
+- B>=2 不同点数、尾组padding、少于patch_size、空候选、缺失视角，无跨样本泄漏。
+- Flash 与 reference 小张量输出/梯度一致。
+- 动作跨组平均、state token、point inverse 正确。
+- 解冻后 action loss 对 SfP、adapter、polar_qkv 有有限梯度。
+- metadata 经 pooling 完整；训练与部署处理一致。
+- 保存投影与所选图像网格的真实 overlay；统计各尺度候选数/截断率/有效投影率。
+- 报告时间和显存开销；没有GPU或checkpoint时明确哪些检查未完成。
+执行完给出修改文件、已完成验证和必要的运行命令。不要宣称模型效果提升，除非确实做了训练评估。

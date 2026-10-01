@@ -133,11 +133,20 @@ class PointTransformerUnetWithAction(nn.Module):
         apply_point_ca=True,
         ptv3_backend="concerto",
         auxiliary_decoder=False,
+        polar_enabled=False,
+        sfp_feature_channels=(64, 128, 256, 512, 512),
+        polar_neighbor_radius=1,
+        polar_max_tokens_per_group=32,
+        polar_max_views=8,
     ):
         super().__init__()
 
         if auxiliary_decoder and (not enc_mode or ptv3_backend != "concerto"):
             raise ValueError("Auxiliary decoder requires the concerto encoder-only action backbone")
+        if polar_enabled and ptv3_backend != "concerto":
+            raise ValueError("Polar joint attention requires the concerto PTv3 backend")
+        if polar_enabled and not enc_mode:
+            raise ValueError("Polar joint attention currently requires ptv3_enc_mode=True")
         ptv3_model_cls = get_ptv3_model_cls(ptv3_backend, with_action=True)
         self.ptv3_model = ptv3_model_cls(
             in_channels=input_size,
@@ -162,7 +171,12 @@ class PointTransformerUnetWithAction(nn.Module):
             shuffle_orders=True,
             enable_flash=True,
             enc_mode=enc_mode and not auxiliary_decoder,
-            apply_point_ca=apply_point_ca
+            apply_point_ca=apply_point_ca,
+            polar_enabled=polar_enabled,
+            sfp_feature_channels=sfp_feature_channels,
+            polar_neighbor_radius=polar_neighbor_radius,
+            polar_max_tokens_per_group=polar_max_tokens_per_group,
+            polar_max_views=polar_max_views,
         )
         self.auxiliary_decoder = auxiliary_decoder
         self.enc_channels = enc_channels
@@ -171,10 +185,11 @@ class PointTransformerUnetWithAction(nn.Module):
         else:
             self.output_size = dec_channels[0]
         self.voxel_size = voxel_size
+        self.polar_enabled = polar_enabled
 
     def prepare_ptv3_batch(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_feat, 
-        time_embeds=None, point_condition=None,
+        time_embeds=None, point_condition=None, polar_context=None,
     ):
         device = pc_fts.device
 
@@ -202,17 +217,32 @@ class PointTransformerUnetWithAction(nn.Module):
             outs['point_condition'] = point_condition
         if time_embeds is not None:
             outs['time_embeds'] = time_embeds
+        if getattr(self, "polar_enabled", False):
+            if polar_context is None:
+                raise ValueError("Polar joint attention is enabled but polar_context was not provided")
+            required = {
+                "polar_feature_levels", "polar_K", "T_camera_from_model",
+                "view_valid", "polar_image_hw",
+            }
+            missing = sorted(required - set(polar_context))
+            if missing:
+                raise ValueError(f"Polar context is missing {missing}")
+            outs.update(polar_context)
+        elif polar_context is not None:
+            raise ValueError("polar_context was provided while polar_enabled=False")
 
         return outs
         
     def forward(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_embeds, 
         time_embeds=None, point_condition=None, return_encoder_point=False,
+        polar_context=None,
     ):
 
         ptv3_batch = self.prepare_ptv3_batch(
             pc_fts, npoints_in_batch, ctx_embeds, ctx_lens,
-            action_embeds, time_embeds=time_embeds, point_condition=point_condition
+            action_embeds, time_embeds=time_embeds, point_condition=point_condition,
+            polar_context=polar_context,
         )
         
         # print(self.ptv3_model)
@@ -222,6 +252,7 @@ class PointTransformerUnetWithAction(nn.Module):
         point_outs = self.ptv3_model(
             ptv3_batch, return_encoder=self.auxiliary_decoder
         ) if self.auxiliary_decoder else self.ptv3_model(ptv3_batch)
+        self.last_polar_route_stats = point_outs.get("polar_route_stats", None)
 
         action_out_embeds = point_outs.action_feat
         

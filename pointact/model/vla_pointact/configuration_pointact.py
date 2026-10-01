@@ -41,6 +41,15 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         ptv3_apply_point_ca=False,
         ptv3_input_channels=6,
         ptv3_backend="concerto",
+        polar_enabled=False,
+        sfp_checkpoint=None,
+        sfp_freeze=True,
+        sfp_allow_random_init=False,
+        sfp_feature_levels=("x1", "x2", "x3", "x4", "x5"),
+        polar_neighbor_radius=1,
+        polar_max_tokens_per_group=32,
+        polar_max_views=8,
+        polar_writeback=False,
         use_polar_material_conditioning=False,
         use_target_reconstruction=False,
         target_reconstruction_weight=0.1,
@@ -86,6 +95,22 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.ptv3_input_channels = ptv3_input_channels
         self.ptv3_apply_point_ca = ptv3_apply_point_ca
         self.ptv3_backend = ptv3_backend
+        self.polar_enabled = polar_enabled
+        self.sfp_checkpoint = sfp_checkpoint
+        self.sfp_freeze = sfp_freeze
+        self.sfp_allow_random_init = sfp_allow_random_init
+        self.sfp_feature_levels = list(sfp_feature_levels)
+        self.polar_neighbor_radius = polar_neighbor_radius
+        self.polar_max_tokens_per_group = polar_max_tokens_per_group
+        self.polar_max_views = polar_max_views
+        self.polar_writeback = polar_writeback
+        if polar_enabled:
+            if ptv3_backend != "concerto" or not ptv3_enc_mode:
+                raise ValueError("Polar joint attention supports only concerto encoder-only PointACT")
+            if list(sfp_feature_levels) != ["x1", "x2", "x3", "x4", "x5"]:
+                raise ValueError("The supported stage mapping is exactly x1..x5")
+            if polar_writeback:
+                raise ValueError("polar_writeback is not implemented; Polar query outputs are discarded")
         self.use_polar_material_conditioning = use_polar_material_conditioning
         self.use_target_reconstruction = use_target_reconstruction
         self.target_reconstruction_weight = target_reconstruction_weight

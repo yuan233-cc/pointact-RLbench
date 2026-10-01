@@ -230,6 +230,33 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         inputs["points"] = torch.cat(batch_points, 0).to(device)
         inputs["npoints_in_batch"] = torch.LongTensor([len(x) for x in batch_points]).to(device)
         inputs["attention_mask"] = inputs["attention_mask"].bool().to(device)
+        if getattr(model.config, "polar_enabled", False):
+            required = ("polar_images", "polar_K", "view_valid")
+            missing = [key for key in required if key not in batch]
+            if missing:
+                raise ValueError(f"Polar inference inputs are missing {missing}")
+            for key in required:
+                inputs[key] = torch.as_tensor(batch[key]).to(device)
+            if "T_camera_from_world" in batch:
+                camera_from_world = torch.as_tensor(batch["T_camera_from_world"], dtype=torch.float32)
+                centers = torch.as_tensor(np.stack(batch_point_centers), dtype=torch.float32)
+                model_from_world = torch.eye(4, dtype=torch.float32).expand(len(centers), 4, 4).clone()
+                model_from_world[:, :3, 3] = -centers
+                inputs["T_camera_from_model"] = (
+                    camera_from_world @ torch.linalg.inv(model_from_world).unsqueeze(1)
+                ).to(device)
+            elif "T_camera_from_model" in batch:
+                inputs["T_camera_from_model"] = torch.as_tensor(
+                    batch["T_camera_from_model"]
+                ).to(device)
+            else:
+                raise ValueError(
+                    "Polar inference requires T_camera_from_world or an already centered "
+                    "T_camera_from_model; calibration is never replaced with identity"
+                )
+            for key in ("pixel_valid", "polar_pixel_transform"):
+                if key in batch:
+                    inputs[key] = torch.as_tensor(batch[key]).to(device)
         if conditioned:
             rgb_images, dense_polar, candidates = [], [], []
             for index, repo_id in enumerate(repo_ids):

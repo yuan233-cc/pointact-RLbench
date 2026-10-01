@@ -17,6 +17,10 @@ from pointact.model.vla_pointact.action_head_3d.ptv3_backbone import (
     PointTransformerUnet,
     PointTransformerUnetWithAction,
 )
+from pointact.model.vla_pointact.action_head_3d.sfp_wild_encoder import (
+    SfpWildFeatureEncoder,
+    load_sfp_wild_checkpoint,
+)
 from pointact.model.vla_pointact.polar_material_conditioner import PolarMaterialConditioner
 from pointact.model.vla_pointact.target_reconstruction import (
     VisibleTargetReconstructionHead, copy_point_tree,
@@ -55,6 +59,13 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         vlm_backbone: Qwen2_5_VLForConditionalGeneration = None,
     ):
         super().__init__(config)
+        if getattr(config, "polar_enabled", False) and self.__class__.__name__ != (
+            "VLAEncDec3DWithActionRegressionModel"
+        ):
+            raise ValueError(
+                "polar_enabled is implemented only for "
+                "VLAEncDec3DWithActionRegressionModel"
+            )
         self.vlm_backbone = vlm_backbone or Qwen2_5_VLForConditionalGeneration(self.config)
 
     def save_pretrained(self, *args, **kwargs):
@@ -66,6 +77,11 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         return self.vlm_backbone.get_input_embeddings()
 
     def _material_point_condition(self, npoints_in_batch, **inputs):
+        material_keys = (
+            "material_rgb", "polar_dense", "material_candidates",
+            "material_candidate_mask", "point_pixel_indices",
+        )
+        inputs = {key: inputs.get(key) for key in material_keys}
         if not self.config.use_polar_material_conditioning:
             if any(value is not None for value in inputs.values()):
                 raise ValueError("Material tensors were provided but use_polar_material_conditioning is disabled")
@@ -169,6 +185,13 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidates: torch.Tensor | None = None,
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
+        polar_images: torch.Tensor | None = None,
+        polar_K: torch.Tensor | None = None,
+        T_camera_from_model: torch.Tensor | None = None,
+        T_model_from_world: torch.Tensor | None = None,
+        view_valid: torch.Tensor | None = None,
+        pixel_valid: torch.Tensor | None = None,
+        polar_pixel_transform: torch.Tensor | None = None,
         target_points: torch.Tensor | None = None,
         target_counts: torch.Tensor | None = None,
         target_input_mask: torch.Tensor | None = None,
@@ -224,6 +247,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidates=material_candidates,
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
+                polar_images=polar_images,
+                polar_K=polar_K,
+                T_camera_from_model=T_camera_from_model,
+                view_valid=view_valid,
+                pixel_valid=pixel_valid,
+                polar_pixel_transform=polar_pixel_transform,
             )
         else:
             outputs = self.vlm_backbone.model(
@@ -260,6 +289,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidates=material_candidates,
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
+                polar_images=polar_images,
+                polar_K=polar_K,
+                T_camera_from_model=T_camera_from_model,
+                view_valid=view_valid,
+                pixel_valid=pixel_valid,
+                polar_pixel_transform=polar_pixel_transform,
                 **auxiliary_labels,
             )
             if isinstance(action_result, tuple):
@@ -315,6 +350,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidates: torch.Tensor | None = None,
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
+        polar_images: torch.Tensor | None = None,
+        polar_K: torch.Tensor | None = None,
+        T_camera_from_model: torch.Tensor | None = None,
+        view_valid: torch.Tensor | None = None,
+        pixel_valid: torch.Tensor | None = None,
+        polar_pixel_transform: torch.Tensor | None = None,
         input_id_lens: list[int] = None,
         **kwargs,
     ) -> Tensor:
@@ -363,6 +404,12 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             material_candidates=material_candidates,
             material_candidate_mask=material_candidate_mask,
             point_pixel_indices=point_pixel_indices,
+            polar_images=polar_images,
+            polar_K=polar_K,
+            T_camera_from_model=T_camera_from_model,
+            view_valid=view_valid,
+            pixel_valid=pixel_valid,
+            polar_pixel_transform=polar_pixel_transform,
         )
     
         return pred_actions, outputs
@@ -889,7 +936,23 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             enc_mode=self.config.ptv3_enc_mode,
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
+            polar_enabled=self.config.polar_enabled,
+            sfp_feature_channels=SfpWildFeatureEncoder.feature_channels,
+            polar_neighbor_radius=self.config.polar_neighbor_radius,
+            polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
+            polar_max_views=self.config.polar_max_views,
         )
+        if self.config.polar_enabled:
+            if self.config.sfp_checkpoint is None and not self.config.sfp_allow_random_init:
+                raise ValueError(
+                    "polar_enabled=True requires sfp_checkpoint; set "
+                    "sfp_allow_random_init=True only for explicit from-scratch tests"
+                )
+            self.sfp_encoder = SfpWildFeatureEncoder()
+            # Normal supervision is not wired into the dataset/loss yet. Keep
+            # the newly restored decoder out of the optimizer's gradient graph
+            # until that loss is enabled, while still loading its checkpoint.
+            self.sfp_encoder.set_normal_decoder_trainable(False)
         if self.config.use_polar_material_conditioning:
             if self.config.ptv3_backend != "concerto":
                 raise ValueError("Polar material conditioning currently requires the concerto PTv3 backend")
@@ -934,10 +997,25 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         )
     
         self.post_init()
+        if self.config.polar_enabled:
+            for module in self.ptv3_model.modules():
+                copy_qkv = getattr(module, "copy_polar_qkv_", None)
+                if copy_qkv is not None:
+                    copy_qkv()
+        if self.config.polar_enabled and self.config.sfp_checkpoint is not None:
+            load_report = load_sfp_wild_checkpoint(
+                self.sfp_encoder, self.config.sfp_checkpoint
+            )
+            logger.info("Loaded SfP-Wild checkpoint: %s", load_report)
+        if self.config.polar_enabled and self.config.sfp_freeze:
+            self.sfp_encoder.requires_grad_(False)
+            self.sfp_encoder.eval()
         nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
         self.to_float32_action_head()
 
     def to_float32_action_head(self):
+        if self.config.polar_enabled:
+            self.sfp_encoder = self.sfp_encoder.to(dtype=torch.float32)
         if self.config.use_polar_material_conditioning:
             self.polar_material_conditioner = self.polar_material_conditioner.to(dtype=torch.float32)
         self.ctx_proj = self.ctx_proj.to(dtype=torch.float32)
@@ -946,6 +1024,64 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         self.ptv3_model = self.ptv3_model.to(dtype=torch.float32)
         self.position_embedding = self.position_embedding.to(dtype=torch.float32)
         self.action_head = self.action_head.to(dtype=torch.float32)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.config.polar_enabled and self.config.sfp_freeze:
+            self.sfp_encoder.eval()
+        return self
+
+    def _build_polar_context(self, batch_size, **kwargs):
+        names = (
+            "polar_images", "polar_K", "T_camera_from_model", "view_valid",
+            "pixel_valid", "polar_pixel_transform",
+        )
+        values = {name: kwargs.get(name) for name in names}
+        if not self.config.polar_enabled:
+            if any(value is not None for value in values.values()):
+                raise ValueError("Polar routing tensors were provided while polar_enabled=False")
+            return None
+        required = ("polar_images", "polar_K", "T_camera_from_model", "view_valid")
+        missing = [name for name in required if values[name] is None]
+        if missing:
+            raise ValueError(f"Polar joint attention is enabled; missing inputs: {missing}")
+        images = values["polar_images"]
+        if images.ndim != 5 or images.shape[0] != batch_size or images.shape[2] != 7:
+            raise ValueError("polar_images must be [B,V,7,H,W] and match the action batch")
+        B, V, _, height, width = images.shape
+        if values["polar_K"].shape != (B, V, 3, 3):
+            raise ValueError("polar_K must be [B,V,3,3]")
+        if values["T_camera_from_model"].shape != (B, V, 4, 4):
+            raise ValueError("T_camera_from_model must be [B,V,4,4]")
+        if values["view_valid"].shape != (B, V):
+            raise ValueError("view_valid must be [B,V]")
+        encoder_dtype = next(self.sfp_encoder.parameters()).dtype
+        flat_images = images.reshape(B * V, 7, height, width).to(encoder_dtype)
+        if self.config.sfp_freeze:
+            with torch.no_grad():
+                flat_levels = self.sfp_encoder.forward_features(flat_images)
+        else:
+            flat_levels = self.sfp_encoder.forward_features(flat_images)
+        levels = tuple(
+            level.reshape(B, V, *level.shape[1:]) for level in flat_levels
+        )
+        image_hw = torch.tensor(
+            [height, width], device=images.device, dtype=torch.long
+        ).expand(B, V, 2)
+        context = {
+            "polar_feature_levels": levels,
+            "polar_K": values["polar_K"],
+            "T_camera_from_model": values["T_camera_from_model"],
+            "view_valid": values["view_valid"].bool(),
+            "polar_image_hw": image_hw,
+        }
+        if values["pixel_valid"] is not None:
+            if values["pixel_valid"].shape != (B, V, height, width):
+                raise ValueError("pixel_valid must be [B,V,H,W]")
+            context["pixel_valid"] = values["pixel_valid"].bool()
+        if values["polar_pixel_transform"] is not None:
+            context["polar_pixel_transform"] = values["polar_pixel_transform"]
+        return context
 
     def compute_action_loss(
         self,
@@ -1007,6 +1143,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             points, npoints_in_batch, ctx_embeds, ctx_lens,
             action_features,
             point_condition=self._material_point_condition(npoints_in_batch, **kwargs),
+            polar_context=self._build_polar_context(batch_size, **kwargs),
         )
         out_npoints_in_batch = torch.diff(
             point_offsets, prepend=torch.tensor([0], device=device, dtype=torch.long)
