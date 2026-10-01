@@ -22,6 +22,19 @@ from pointact.model.vla_pointact.action_head_3d.polar_router import PolarTokenRo
 
 
 class GridPoolingWithAction(GridPooling):
+    _SHARED_POLAR_KEYS = (
+        "polar_feature_levels",
+        "polar_features",
+        "polar_K",
+        "T_camera_from_model",
+        "T_model_from_world",
+        "view_valid",
+        "pixel_valid",
+        "polar_image_hw",
+        "polar_pixel_transform",
+        "polar_route_stats",
+    )
+
     def __init__(self, in_channels, out_channels, **kwargs):
         super().__init__(in_channels, out_channels, **kwargs)
         self.action_proj = nn.Linear(in_channels, out_channels)
@@ -30,6 +43,12 @@ class GridPoolingWithAction(GridPooling):
             self.action_norm = PointSequential(norm_layer(out_channels))
 
     def forward(self, point: Point):
+        # Utonia's base pooling constructs a fresh Point and therefore drops
+        # observation-level metadata. Keep the Polar banks/calibration shared
+        # across stages just as the Concerto pooling path does.
+        polar_metadata = {
+            key: point[key] for key in self._SHARED_POLAR_KEYS if key in point
+        }
         action_feat = self.action_proj(point.action_feat)
         if hasattr(self, "action_norm"):
             action_feat = self.action_norm(action_feat)
@@ -37,6 +56,7 @@ class GridPoolingWithAction(GridPooling):
             action_feat = self.act(action_feat)
 
         point = super().forward(point)
+        point.update(polar_metadata)
         point.action_feat = action_feat
         return point
 
