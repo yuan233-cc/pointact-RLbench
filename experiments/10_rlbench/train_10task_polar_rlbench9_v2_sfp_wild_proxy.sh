@@ -66,6 +66,9 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --data-path "$data_path" \
     --chunk-size 1 \
     --dataloader-num-workers "${DATALOADER_NUM_WORKERS:-8}" \
+    --dataloader-prefetch-factor "${DATALOADER_PREFETCH_FACTOR:-2}" \
+    --dataloader-persistent-workers "${DATALOADER_PERSISTENT_WORKERS:-True}" \
+    --dataloader-pin-memory "${DATALOADER_PIN_MEMORY:-True}" \
     --freeze-vision-tower True --freeze-llm True --freeze-merger True \
     --bf16 "${BF16:-True}" --tf32 "${TF32:-True}" --fp16 "${FP16:-False}" \
     --num-train-epochs "${EPOCHS:-1000}" --max-steps "${MAX_STEPS:-40000}" \
