@@ -184,6 +184,20 @@ controlled comparison.
 For evaluation, use `run_filled9_rlbench.py` as the client and
 `run_xyzpolar_filled6_server.py` as the policy server; the latter performs the
 same `[XYZ, polar]` column selection as training.
+
+SfP-Wild checkpoints use the live native-polarization renderer through a
+separate adapter. It converts the rendered RGB, DoLP, AoLP and calibrated front
+camera into the same seven-channel SfP tensor used by training, while the point
+branch receives the same corrupted incomplete nine-channel cloud as training:
+
+```bash
+bash experiments/10_rlbench/eval_sfp_wild_rlbench_local.sh \
+  /absolute/path/to/checkpoint-STEP STEP
+```
+
+The checkpoint must be an SfP-Wild action-regression run with polar depth
+self-supervision enabled. Existing point-polar classification checkpoints keep
+using `run_filled9_rlbench.py`; their inference path is unchanged.
 The three controlled launchers share one training command. Its defaults are
 1000 epochs, batch size 512 per GPU, learning rate `1e-4`, cosine scheduling,
 seed/data seed 42, and a checkpoint every 500 steps. Override `OUTPUT_DIR`,

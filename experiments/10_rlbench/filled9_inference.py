@@ -197,7 +197,7 @@ def fill_cloud(
     return filled, filled_pixels, filled_mask
 
 
-def build_filled9(
+def build_incomplete9(
     frame: Mapping[str, np.ndarray],
     *,
     task_index: int,
@@ -205,7 +205,7 @@ def build_filled9(
     corruption_seed: int,
     voxel_size: float = 0.012,
 ):
-    """Produce one filled Nx9 policy input and reproducibility statistics."""
+    """Produce the training-matched incomplete Nx9 policy input."""
     clean, clean_pixels = clean_voxel_points(frame, voxel_size)
     indexed = np.column_stack((clean[:, :6], np.arange(len(clean), dtype=np.float32)))
     corruption = apply_corruption(indexed, task_index, source_episode, corruption_seed)
@@ -217,18 +217,42 @@ def build_filled9(
     )
     retained_source_pixels = clean_pixels[source_rows[valid]].astype(np.int32)
     holes = corruption_hole_pixels(clean_pixels, retained_source_pixels)
-    filled, filled_pixels, filled_mask = fill_cloud(
-        incomplete, projected_pixels[valid], holes, frame
-    )
-    if filled.ndim != 2 or filled.shape[1] != 9 or not np.isfinite(filled).all():
-        raise ValueError(f"Invalid filled9 cloud: {filled.shape}")
+    if incomplete.ndim != 2 or incomplete.shape[1] != 9 or not np.isfinite(incomplete).all():
+        raise ValueError(f"Invalid incomplete9 cloud: {incomplete.shape}")
     stats = {
         "clean_points": int(len(clean)),
         "corrupted_points": int(len(corruption.cloud)),
         "valid_incomplete_points": int(len(incomplete)),
         "hole_pixels": int(len(holes)),
+        "corruption": corruption.stats,
+    }
+    return incomplete, projected_pixels[valid].astype(np.int32), holes, stats
+
+
+def build_filled9(
+    frame: Mapping[str, np.ndarray],
+    *,
+    task_index: int,
+    source_episode: int,
+    corruption_seed: int,
+    voxel_size: float = 0.012,
+):
+    """Produce one filled Nx9 policy input and reproducibility statistics."""
+    incomplete, incomplete_pixels, holes, stats = build_incomplete9(
+        frame,
+        task_index=task_index,
+        source_episode=source_episode,
+        corruption_seed=corruption_seed,
+        voxel_size=voxel_size,
+    )
+    filled, filled_pixels, filled_mask = fill_cloud(
+        incomplete, incomplete_pixels, holes, frame
+    )
+    if filled.ndim != 2 or filled.shape[1] != 9 or not np.isfinite(filled).all():
+        raise ValueError(f"Invalid filled9 cloud: {filled.shape}")
+    stats = {
+        **stats,
         "depth_filled_points": int(filled_mask.sum()),
         "filled_points": int(len(filled)),
-        "corruption": corruption.stats,
     }
     return filled, filled_pixels, filled_mask, stats
