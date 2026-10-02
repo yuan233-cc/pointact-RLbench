@@ -211,6 +211,13 @@ class SfpWildFeatureEncoder(nn.Module):
         """Enable or freeze the decoder independently from the feature encoder."""
         for module in (self.up1, self.up2, self.up3, self.up4, self.outc):
             module.requires_grad_(trainable)
+            if not trainable:
+                module.eval()
+
+    def set_normal_decoder_training(self, training: bool) -> None:
+        """Set decoder mode without changing the shared feature encoder mode."""
+        for module in (self.up1, self.up2, self.up3, self.up4, self.outc):
+            module.train(training)
 
     def forward_features(self, polar_images: Tensor) -> tuple[Tensor, ...]:
         if polar_images.ndim != 4 or polar_images.shape[1] != 7:

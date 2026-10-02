@@ -46,6 +46,7 @@ the seven-channel Polar tensor.
 --sfp_feature_levels x1 x2 x3 x4 x5
 --polar_neighbor_radius 1
 --polar_max_tokens_per_group 32
+--polar_token_mode local
 --polar_max_views 8
 --polar_writeback false
 ```
@@ -54,6 +55,13 @@ Select the point backbone with `--ptv3_backend concerto` or
 `--ptv3_backend utonia`. Utonia retains its 3D rotary encoding for point
 queries and keys; projected Polar tokens use their normalized image location,
 camera-view embedding, and modality embedding.
+
+`polar_token_mode=local` preserves calibrated projection routing and caps each
+group at `polar_max_tokens_per_group`. `polar_token_mode=all` is the additional
+global branch: every valid SfP grid token for that sample is copied into every
+serialized point group, exactly as action tokens are copied. The all-token
+branch intentionally ignores the local token cap and can be very expensive at
+high-resolution feature levels.
 
 The official checkpoint link is in the SfP-Wild README. A missing checkpoint
 is an error. `sfp_allow_random_init=true` exists only for explicit from-scratch
@@ -71,10 +79,8 @@ a full SfP-Wild checkpoint loads both the feature encoder and normal decoder.
 An older encoder-only checkpoint remains valid and reports the decoder keys as
 missing instead of silently treating them as pretrained.
 
-The existing Polar-token path continues to call `forward_features()` and does
-not execute the decoder. Call `forward_with_normals()` to obtain `(x1..x5,
-raw_normals)`, or `decode_normals(levels, normalize=True)` for unit camera-frame
-normals. The integrated PointACT model currently freezes these decoder
-parameters because normal ground truth and its auxiliary loss are not yet part
-of the batch contract; this avoids unused trainable parameters in distributed
-action-only training.
+The action-only Polar-token path continues to call `forward_features()`. With
+polar/depth self-supervision enabled, `decode_normals(levels, normalize=True)`
+provides detached unit-normal targets for the normals differentiated from
+predicted depth. The integrated model keeps `up1`--`outc` frozen and in eval
+mode; a full checkpoint is required for this objective.

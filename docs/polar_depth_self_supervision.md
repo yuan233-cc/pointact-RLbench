@@ -37,41 +37,21 @@ gradients through the remaining polar/point fusion context.
 ## Objective
 
 Predicted depth is back-projected with the calibrated intrinsics. Central
-finite differences give a camera-facing normal at each interior pixel. With
-incidence angle `theta` and refractive index `eta`, the code evaluates both
-the dielectric diffuse and specular Fresnel DoLP candidates.
-
-The observed doubled-angle phase vector is
-
-```text
-(cos(2AoLP), sin(2AoLP))
-```
-
-For the predicted normal azimuth, diffuse and specular AoLP differ by `pi/2`.
-Their doubled-angle vectors therefore have opposite signs. The phase loss uses
-the absolute dot product to handle this ambiguity. DoLP is compared separately
-against the lower-error diffuse/specular Fresnel candidate, with a default
-weight of 0.25 because fixed-eta DoLP is sensitive to material. Separating
-phase and DoLP also prevents a fronto-parallel zero-DoLP prediction from
-trivially minimizing a raw normalized-Stokes loss. It also uses:
+finite differences give a camera-facing normal at each interior pixel.
+SfP-Wild's pretrained normal decoder produces a unit-normal pseudo-target from
+the same five image feature levels. After converting the depth normal's x axis
+from OpenCV `+right` to SfP-Wild `+left`, the consistency term is the masked
+cosine distance `1 - dot(n_depth, stopgrad(n_sfp))`. The SfP normal decoder is
+always frozen/eval and the target is detached, so the objective updates the
+depth/fusion path rather than moving its own target. It also uses:
 
 - masked point modelling: points at 30% of observed depth pixels are removed
   before PointACT and supervise a robust log-depth error, which fixes metric
   scale without feeding a depth image to the decoder;
 - edge-aware inverse-depth smoothness, weighted by `I_un` image gradients.
 
-The implemented objective is inspired by CroMo's differentiable
-geometry-to-polarization constraint. It is adapted to this dataset because
-there is no iToF observation, full point cloud, or GT normal.
-
-References: [CroMo](https://arxiv.org/abs/2203.12485) and
-[S²P³](https://link.springer.com/article/10.1007/s11263-023-01965-w).
-
-`I_un` in the current sidecar is RGB luminance, not physical unpolarized
-intensity/S0. Therefore the loss compares DoLP and doubled-angle AoLP phase,
-and does not reconstruct the four analyzer intensities. `I_un` is still used by SfP-Wild
-and as the edge image for smoothness. If physical S0 is rendered later, an
-analyzer-intensity loss can be added safely.
+There is no Fresnel/DoLP/AoLP reconstruction term in this objective. `I_un` is
+still used by SfP-Wild and as the edge image for smoothness.
 
 ## Training
 
@@ -95,16 +75,16 @@ POLAR_DEPTH_LOSS_WEIGHT=0.1
 POLAR_CONSISTENCY_WEIGHT=1.0
 SPARSE_DEPTH_WEIGHT=1.0
 DEPTH_SMOOTHNESS_WEIGHT=0.01
-POLAR_REFRACTIVE_INDEX=1.5
-POLAR_MIN_DOLP=0.02
-POLAR_DOLP_WEIGHT=0.25
+POLAR_TOKEN_MODE=local  # set all to repeat the full Polar bank per point group
 POLAR_DEPTH_KEEP_PROBABILITY=0.7
 POLAR_DEPTH_MIN=0.05
 POLAR_DEPTH_MAX=4.5
 MAX_STEPS=40000
 ```
 
-With `SFP_FREEZE=True`, the pretrained SfP encoder remains frozen. The
+Normal consistency requires a full SfP-Wild checkpoint containing `up1`--`up4`
+and `outc`; an encoder-only checkpoint is rejected. With `SFP_FREEZE=True`,
+the pretrained SfP encoder remains frozen. The
 self-supervised loss updates the PointACT point/polar fusion blocks directly,
 because their five output feature maps are decoder inputs. It also updates the
 depth decoder. PointACT's original per-stage linear adapters remain necessary
@@ -117,11 +97,6 @@ The projection is zero-initialized so loading/training starts with baseline
 action behavior. It then learns from action loss, allowing completed geometry
 to affect action prediction. With `SFP_FREEZE=False`, both losses additionally
 update the SfP encoder.
-
-The fixed dielectric Fresnel model is only an approximation for conductors,
-mixed pixels, and unknown refractive indices. The per-pixel diffuse/specular
-minimum and robust losses reduce this sensitivity, but material-dependent eta
-or a learned confidence head is the next extension if these pixels dominate.
 
 ## Dataset and pipeline audit
 

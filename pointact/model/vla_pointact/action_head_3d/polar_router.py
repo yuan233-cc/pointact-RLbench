@@ -94,15 +94,84 @@ def _balanced_spatial_sample(keys: Tensor, budget: int) -> Tensor:
 
 
 class PolarTokenRouter:
-    """Select sparse feature cells for each existing serialized attention group."""
+    """Build local or sample-wide Polar tokens for serialized attention groups."""
 
-    def __init__(self, level: int, neighbor_radius: int = 1, max_tokens: int = 32, z_epsilon: float = 1e-6):
+    def __init__(
+        self,
+        level: int,
+        neighbor_radius: int = 1,
+        max_tokens: int = 32,
+        z_epsilon: float = 1e-6,
+        mode: str = "local",
+    ):
         if neighbor_radius < 0 or max_tokens <= 0:
             raise ValueError("neighbor_radius must be >=0 and max_tokens must be >0")
+        if mode not in ("local", "all"):
+            raise ValueError("Polar token mode must be 'local' or 'all'")
         self.level = level
         self.neighbor_radius = neighbor_radius
         self.max_tokens = max_tokens
         self.z_epsilon = z_epsilon
+        self.mode = mode
+
+    @staticmethod
+    def _route_from_keys(features: Tensor, sample: int, keys: Tensor) -> PolarRoute:
+        _, _, feat_h, feat_w, channels = features.shape
+        if len(keys):
+            values = features[sample, keys[:, 0], keys[:, 1], keys[:, 2]]
+            xy = torch.stack(
+                (
+                    keys[:, 2].float() / max(feat_w - 1, 1) * 2 - 1,
+                    keys[:, 1].float() / max(feat_h - 1, 1) * 2 - 1,
+                ),
+                dim=-1,
+            ).to(values.dtype)
+            views = keys[:, 0]
+        else:
+            values = features.new_empty((0, channels))
+            xy = features.new_empty((0, 2))
+            views = torch.empty(0, dtype=torch.long, device=features.device)
+        return PolarRoute(values, xy, views, len(keys), len(keys), keys)
+
+    def _all_sample_tokens(self, point, sample: int) -> PolarRoute:
+        """Return every valid feature cell, shared by every group in a sample."""
+        features = point.polar_features
+        _, num_views, feat_h, feat_w, _ = features.shape
+        stride, center_offset = sfp_feature_geometry(self.level)
+        keys = []
+        for view in range(num_views):
+            if not bool(point.view_valid[sample, view]):
+                continue
+            rows, cols = torch.meshgrid(
+                torch.arange(feat_h, device=features.device),
+                torch.arange(feat_w, device=features.device),
+                indexing="ij",
+            )
+            keep = torch.ones_like(rows, dtype=torch.bool)
+            pixel_valid = point.get("pixel_valid")
+            if pixel_valid is not None:
+                image_h = int(point.polar_image_hw[sample, view, 0].item())
+                image_w = int(point.polar_image_hw[sample, view, 1].item())
+                pixel_rows = (rows.float() * stride + center_offset).round().long()
+                pixel_cols = (cols.float() * stride + center_offset).round().long()
+                inside = (
+                    (pixel_rows >= 0) & (pixel_rows < image_h)
+                    & (pixel_cols >= 0) & (pixel_cols < image_w)
+                )
+                safe_rows = pixel_rows.clamp(0, image_h - 1)
+                safe_cols = pixel_cols.clamp(0, image_w - 1)
+                keep &= inside & pixel_valid[
+                    sample, view, safe_rows, safe_cols
+                ].bool()
+            view_ids = torch.full_like(rows[keep], view)
+            keys.append(torch.stack((view_ids, rows[keep], cols[keep]), dim=-1))
+        if keys:
+            selected_keys = torch.cat(keys, dim=0)
+        else:
+            selected_keys = torch.empty(
+                (0, 3), dtype=torch.long, device=features.device
+            )
+        return self._route_from_keys(features, sample, selected_keys)
 
     def __call__(self, point, order: Tensor, group_lengths: Tensor) -> list[PolarRoute]:
         required = (
@@ -114,7 +183,7 @@ class PolarTokenRouter:
         features = point.polar_features
         if features.ndim != 5:
             raise ValueError("polar_features must be [B,V,Hf,Wf,C]")
-        batch_size, num_views, feat_h, feat_w, channels = features.shape
+        batch_size, num_views, feat_h, feat_w, _ = features.shape
         if point.polar_K.shape != (batch_size, num_views, 3, 3):
             raise ValueError("polar_K shape does not match the feature bank")
         if point.T_camera_from_model.shape != (batch_size, num_views, 4, 4):
@@ -136,6 +205,7 @@ class PolarTokenRouter:
         total_valid_projections = 0
         total_candidates = 0
         total_selected = 0
+        all_token_cache = {}
 
         for group_indices in groups:
             unique_indices = torch.unique(group_indices, sorted=True)
@@ -145,6 +215,15 @@ class PolarTokenRouter:
             sample = int(sample_ids.item())
             coords = point.coord[unique_indices].float()
             total_unique_points += len(coords)
+            if self.mode == "all":
+                if sample not in all_token_cache:
+                    all_token_cache[sample] = self._all_sample_tokens(point, sample)
+                route = all_token_cache[sample]
+                total_valid_projections += route.valid_projection_count
+                total_candidates += route.candidate_count
+                total_selected += len(route.features)
+                routes.append(route)
+                continue
             homogeneous = torch.cat((coords, torch.ones_like(coords[:, :1])), dim=-1)
             keys = []
             valid_for_group = 0
@@ -186,32 +265,20 @@ class PolarTokenRouter:
                 candidate_keys = torch.unique(torch.cat(keys, 0), sorted=True, dim=0)
                 candidate_count = len(candidate_keys)
                 selected_keys = _balanced_spatial_sample(candidate_keys, self.max_tokens)
-                values = features[
-                    sample, selected_keys[:, 0], selected_keys[:, 1], selected_keys[:, 2]
-                ]
-                xy = torch.stack(
-                    (
-                        selected_keys[:, 2].float() / max(feat_w - 1, 1) * 2 - 1,
-                        selected_keys[:, 1].float() / max(feat_h - 1, 1) * 2 - 1,
-                    ),
-                    dim=-1,
-                ).to(values.dtype)
-                views = selected_keys[:, 0]
             else:
                 candidate_count = 0
                 selected_keys = torch.empty((0, 3), dtype=torch.long, device=features.device)
-                values = features.new_empty((0, channels))
-                xy = features.new_empty((0, 2))
-                views = torch.empty(0, dtype=torch.long, device=features.device)
+            route = self._route_from_keys(features, sample, selected_keys)
+            route.candidate_count = candidate_count
+            route.valid_projection_count = valid_for_group
             total_valid_projections += valid_for_group
             total_candidates += candidate_count
-            total_selected += len(values)
-            routes.append(
-                PolarRoute(values, xy, views, candidate_count, valid_for_group, selected_keys)
-            )
+            total_selected += len(route.features)
+            routes.append(route)
 
         stats = {
             "stage": self.level,
+            "mode": self.mode,
             "groups": len(routes),
             "unique_group_points": total_unique_points,
             "valid_projections": total_valid_projections,

@@ -284,9 +284,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         action_loss = None
         target_reconstruction_loss = None
         polar_depth_self_supervision_loss = None
+        normal_consistency_loss = None
         polar_consistency_loss = None
-        polar_phase_loss = None
-        polar_dolp_loss = None
         sparse_depth_consistency_loss = None
         depth_smoothness_loss = None
         if actions is not None:
@@ -324,9 +323,10 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                     polar_auxiliary = action_result[3]
                     if isinstance(polar_auxiliary, dict):
                         polar_depth_self_supervision_loss = polar_auxiliary["loss"]
-                        polar_consistency_loss = polar_auxiliary["polar_loss"]
-                        polar_phase_loss = polar_auxiliary["polar_phase_loss"]
-                        polar_dolp_loss = polar_auxiliary["polar_dolp_loss"]
+                        normal_consistency_loss = polar_auxiliary[
+                            "normal_consistency_loss"
+                        ]
+                        polar_consistency_loss = normal_consistency_loss
                         sparse_depth_consistency_loss = polar_auxiliary["sparse_depth_loss"]
                         depth_smoothness_loss = polar_auxiliary["smoothness_loss"]
                     else:
@@ -360,9 +360,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             text_loss=text_loss,
             target_reconstruction_loss=target_reconstruction_loss,
             polar_depth_self_supervision_loss=polar_depth_self_supervision_loss,
+            normal_consistency_loss=normal_consistency_loss,
             polar_consistency_loss=polar_consistency_loss,
-            polar_phase_loss=polar_phase_loss,
-            polar_dolp_loss=polar_dolp_loss,
             sparse_depth_consistency_loss=sparse_depth_consistency_loss,
             depth_smoothness_loss=depth_smoothness_loss,
             actions=output_actions,
@@ -984,6 +983,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
             polar_max_views=self.config.polar_max_views,
+            polar_token_mode=self.config.polar_token_mode,
         )
         if self.config.polar_enabled:
             if self.config.polar_backbone == "sfp_wild":
@@ -993,9 +993,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                         "sfp_allow_random_init=True only for explicit from-scratch tests"
                     )
                 self.sfp_encoder = SfpWildFeatureEncoder()
-                # The self-supervised path obtains normals by differentiating its
-                # predicted depth. SfP-Wild's separate normal decoder is therefore
-                # kept out of the optimizer while its checkpoint still loads.
+                # SfP-Wild normals are fixed pseudo-targets for the depth-normal
+                # consistency loss, so its normal decoder stays out of the optimizer.
                 self.sfp_encoder.set_normal_decoder_trainable(False)
             elif self.config.polar_backbone == "cga_transformer":
                 if self.config.cga_checkpoint is None and not self.config.cga_allow_random_init:
@@ -1014,11 +1013,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 point_feature_channels=tuple(self.config.ptv3_enc_channels),
                 min_depth=self.config.polar_depth_min,
                 max_depth=self.config.polar_depth_max,
-                refractive_index=self.config.polar_refractive_index,
-                min_dolp=self.config.polar_min_dolp,
-                dolp_weight=self.config.polar_dolp_weight,
                 depth_keep_probability=self.config.polar_depth_keep_probability,
-                polar_weight=self.config.polar_consistency_weight,
+                normal_weight=self.config.polar_consistency_weight,
                 sparse_depth_weight=self.config.sparse_depth_consistency_weight,
                 smoothness_weight=self.config.depth_smoothness_weight,
             )
@@ -1088,7 +1084,9 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             and self.config.sfp_checkpoint is not None
         ):
             load_report = load_sfp_wild_checkpoint(
-                self.sfp_encoder, self.config.sfp_checkpoint
+                self.sfp_encoder,
+                self.config.sfp_checkpoint,
+                require_decoder=self.config.use_polar_depth_self_supervision,
             )
             logger.info("Loaded SfP-Wild checkpoint: %s", load_report)
         if (
@@ -1139,6 +1137,11 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         super().train(mode)
         if self.config.polar_enabled and self._polar_encoder_frozen():
             self._polar_encoder().eval()
+        if (
+            self.config.use_polar_depth_self_supervision
+            and self.config.polar_backbone == "sfp_wild"
+        ):
+            self.sfp_encoder.set_normal_decoder_training(False)
         return self
 
     def _build_polar_context(self, batch_size, **kwargs):
@@ -1204,6 +1207,18 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         compute_loss=False,
         depth_supervision_mask=None,
     ):
+        sfp_normals = None
+        if compute_loss:
+            batch, views = polar_context["polar_K"].shape[:2]
+            detached_levels = tuple(
+                level.detach().reshape(batch * views, *level.shape[2:])
+                for level in polar_context["polar_feature_levels"]
+            )
+            with torch.no_grad():
+                sfp_normals = self.sfp_encoder.decode_normals(
+                    detached_levels, normalize=True
+                )
+            sfp_normals = sfp_normals.reshape(batch, views, *sfp_normals.shape[1:])
         point_levels, point_valid_levels = rasterize_fused_point_features(
             stage_points=stage_points,
             feature_levels=polar_context["polar_feature_levels"],
@@ -1226,6 +1241,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             view_valid=polar_context.get("view_valid"),
             compute_loss=compute_loss,
             depth_supervision_mask=depth_supervision_mask,
+            sfp_normals=sfp_normals,
         )
 
     def compute_action_loss(
@@ -1245,7 +1261,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             points, npoints_in_batch, ctx_embeds, ctx_lens, states,
             _polar_context=polar_context,
             _return_polar_auxiliary=self.config.use_polar_depth_self_supervision,
-            _compute_polar_loss=self.config.use_polar_depth_self_supervision,
+            _compute_depth_loss=self.config.use_polar_depth_self_supervision,
             **kwargs,
         )
         if self.config.use_polar_depth_self_supervision:
@@ -1300,7 +1316,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         if polar_context is None:
             polar_context = self._build_polar_context(batch_size, **kwargs)
         return_polar_auxiliary = kwargs.pop("_return_polar_auxiliary", False)
-        compute_auxiliary_loss = kwargs.pop("_compute_polar_loss", False)
+        compute_auxiliary_loss = kwargs.pop("_compute_depth_loss", False)
         point_condition = self._material_point_condition(npoints_in_batch, **kwargs)
         depth_supervision_mask = None
         if (

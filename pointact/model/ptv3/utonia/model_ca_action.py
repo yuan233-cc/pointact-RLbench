@@ -111,12 +111,14 @@ class SerializedAttentionWithAction(SerializedAttention):
         neighbor_radius=1,
         max_tokens=32,
         max_views=8,
+        token_mode="local",
     ):
         self.polar_enabled = True
         self.polar_router = PolarTokenRouter(
             level=stage_index,
             neighbor_radius=neighbor_radius,
             max_tokens=max_tokens,
+            mode=token_mode,
         )
         self.polar_norm = nn.LayerNorm(self.channels)
         self.polar_position = nn.Linear(2, self.channels)
@@ -396,6 +398,7 @@ class BlockWithAction(Block):
         polar_neighbor_radius=1,
         polar_max_tokens=32,
         polar_max_views=8,
+        polar_token_mode="local",
     ):
         super().__init__(
             channels=channels,
@@ -429,6 +432,7 @@ class BlockWithAction(Block):
                 neighbor_radius=polar_neighbor_radius,
                 max_tokens=polar_max_tokens,
                 max_views=polar_max_views,
+                token_mode=polar_token_mode,
             )
 
         self.action_proj = nn.Linear(channels, channels)
@@ -608,6 +612,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
+        polar_token_mode="local",
     ):
         PointModule.__init__(self)
 
@@ -704,6 +709,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         polar_neighbor_radius=polar_neighbor_radius,
                         polar_max_tokens=polar_max_tokens_per_group,
                         polar_max_views=polar_max_views,
+                        polar_token_mode=polar_token_mode,
                     ),
                     name=f"block{i}",
                 )

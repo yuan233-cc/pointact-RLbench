@@ -1,13 +1,8 @@
-"""Single-view polar/depth self-supervision for dense metric depth.
+"""Single-view normal/depth self-supervision for dense metric depth.
 
-The loss is CroMo-inspired: predicted metric depth is differentiated into
-camera-frame normals, Fresnel equations map incidence angle to diffuse and
-specular degrees of linear polarization, and the result is compared with the
-measured DoLP and doubled-angle AoLP phase vector.
-
-The normalized form deliberately does not reconstruct analyzer intensities.
-That would require a physical unpolarized intensity/S0 image; PointAct's
-current RLBench sidecar contains an RGB-luminance proxy instead.
+Predicted metric depth is differentiated into camera-frame normals and matched
+directly to the normals decoded by the pretrained SfP-Wild model.  Sparse depth
+and edge-aware smoothness retain metric scale and regularize unobserved pixels.
 """
 
 from __future__ import annotations
@@ -312,37 +307,13 @@ def depth_to_normals(depth: Tensor, intrinsics: Tensor, eps: float = 1e-6) -> tu
     return normals, valid
 
 
-def fresnel_dolp(cos_theta: Tensor, refractive_index: float = 1.5) -> tuple[Tensor, Tensor]:
-    """Return dielectric diffuse and specular DoLP candidates."""
-    eta = torch.as_tensor(refractive_index, dtype=cos_theta.dtype, device=cos_theta.device)
-    cos_theta = cos_theta.clamp(0.0, 1.0)
-    sin2 = (1.0 - cos_theta.square()).clamp(0.0, 1.0)
-    root = torch.sqrt((eta.square() - sin2).clamp_min(1e-8))
-
-    diffuse_num = (eta - eta.reciprocal()).square() * sin2
-    diffuse_den = (
-        2 + 2 * eta.square()
-        - (eta + eta.reciprocal()).square() * sin2
-        + 4 * cos_theta * root
-    )
-    diffuse = diffuse_num / diffuse_den.clamp_min(1e-8)
-
-    specular_num = 2 * sin2 * cos_theta * root
-    specular_den = (
-        eta.square() - sin2 - eta.square() * sin2
-        + 2 * sin2.square()
-    )
-    specular = specular_num / specular_den.abs().clamp_min(1e-8)
-    return diffuse.clamp(0.0, 1.0), specular.clamp(0.0, 1.0)
-
-
 def _masked_mean(values: Tensor, weights: Tensor) -> Tensor:
     weights = weights.to(values.dtype)
     return (values * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 class PolarDepthSelfSupervision(nn.Module):
-    """Decode dense depth and apply polar, sparse-depth, and smoothness losses."""
+    """Decode dense depth and apply normal, sparse-depth, and smoothness losses."""
 
     def __init__(
         self,
@@ -350,37 +321,21 @@ class PolarDepthSelfSupervision(nn.Module):
         point_feature_channels: tuple[int, ...] = (32, 64, 128, 256, 512),
         min_depth: float = 0.05,
         max_depth: float = 4.5,
-        refractive_index: float = 1.5,
-        min_dolp: float = 0.02,
-        dolp_weight: float = 0.25,
         depth_keep_probability: float = 0.7,
-        polar_weight: float = 1.0,
+        normal_weight: float = 1.0,
         sparse_depth_weight: float = 1.0,
         smoothness_weight: float = 0.01,
     ):
         super().__init__()
-        if refractive_index <= 1:
-            raise ValueError("refractive_index must be greater than one")
-        if not 0 <= min_dolp < 1:
-            raise ValueError("min_dolp must be in [0,1)")
-        if dolp_weight < 0:
-            raise ValueError("dolp_weight must be non-negative")
         if not 0 < depth_keep_probability < 1:
             raise ValueError("depth_keep_probability must be in (0,1)")
         self.decoder = PolarPointDepthDecoder(
             feature_channels, point_feature_channels, min_depth, max_depth
         )
-        self.refractive_index = float(refractive_index)
-        self.min_dolp = float(min_dolp)
-        self.dolp_weight = float(dolp_weight)
         self.depth_keep_probability = float(depth_keep_probability)
-        self.polar_weight = float(polar_weight)
+        self.normal_weight = float(normal_weight)
         self.sparse_depth_weight = float(sparse_depth_weight)
         self.smoothness_weight = float(smoothness_weight)
-
-    @staticmethod
-    def _charbonnier(x: Tensor, eps: float = 1e-3) -> Tensor:
-        return torch.sqrt(x.square() + eps * eps) - eps
 
     @staticmethod
     def _cauchy(x: Tensor, scale: float = 0.1) -> Tensor:
@@ -400,6 +355,7 @@ class PolarDepthSelfSupervision(nn.Module):
         view_valid: Tensor | None = None,
         compute_loss: bool = True,
         depth_supervision_mask: Tensor | None = None,
+        sfp_normals: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if polar_images.ndim != 5 or polar_images.shape[2] != 7:
             raise ValueError("polar_images must be [B,V,7,H,W]")
@@ -412,6 +368,9 @@ class PolarDepthSelfSupervision(nn.Module):
                 raise ValueError(f"observed_depth must have shape {expected_depth_shape}")
             if observed_depth_valid is None or observed_depth_valid.shape != expected_depth_shape:
                 raise ValueError("observed_depth_valid must match observed_depth")
+            expected_normal_shape = (batch, views, 3, height, width)
+            if sfp_normals is None or sfp_normals.shape != expected_normal_shape:
+                raise ValueError(f"sfp_normals must have shape {expected_normal_shape}")
 
         flat_levels = tuple(level.reshape(batch * views, *level.shape[2:]) for level in feature_levels)
         flat_point_levels = tuple(
@@ -482,47 +441,35 @@ class PolarDepthSelfSupervision(nn.Module):
 
         flat_k = intrinsics.reshape(batch * views, 3, 3).to(prediction.dtype)
         normals, normal_valid = depth_to_normals(prediction, flat_k)
-        points = depth_to_camera_points(prediction, flat_k)
-        view_direction = F.normalize(-points, dim=1, eps=1e-6)
-        cos_theta = (normals * view_direction).sum(dim=1, keepdim=True).abs()
-        rho_diffuse, rho_specular = fresnel_dolp(cos_theta, self.refractive_index)
-
-        # SfP-Wild uses +left,+down image rays while the calibrated pinhole
-        # camera uses +right,+down, hence the x sign conversion below.
-        normal_x = -normals[:, 0:1]
-        normal_y = normals[:, 1:2]
-        azimuth_norm2 = (normal_x.square() + normal_y.square()).clamp_min(1e-8)
-        cos2alpha = (normal_x.square() - normal_y.square()) / azimuth_norm2
-        sin2alpha = 2 * normal_x * normal_y / azimuth_norm2
-
         polar = polar_images.reshape(batch * views, 7, height, width).to(prediction.dtype)
-        observed_rho = polar[:, 1:2].clamp(0.0, 1.0)
-        observed_cos2 = polar[:, 2:3].clamp(-1.0, 1.0)
-        observed_sin2 = polar[:, 3:4].clamp(-1.0, 1.0)
-        # Diffuse and specular AoLP differ by pi/2. In doubled-angle space
-        # they are opposite vectors, so abs(dot) resolves the ambiguity while
-        # still penalizing a fronto-parallel/undefined predicted azimuth. This
-        # avoids the zero-DoLP shortcut that a raw q/u loss admits.
-        phase_alignment = (
-            cos2alpha * observed_cos2 + sin2alpha * observed_sin2
-        ).abs().clamp(0.0, 1.0)
-        phase_error = 1.0 - phase_alignment
-        diffuse_dolp_error = self._charbonnier(rho_diffuse - observed_rho)
-        specular_dolp_error = self._charbonnier(rho_specular - observed_rho)
-        dolp_error = torch.minimum(diffuse_dolp_error, specular_dolp_error)
-        polar_error = phase_error + self.dolp_weight * dolp_error
+        target_normals = sfp_normals.detach().reshape(
+            batch * views, 3, height, width
+        ).to(prediction.dtype)
+        target_magnitude = torch.linalg.vector_norm(
+            target_normals, dim=1, keepdim=True
+        )
+        target_valid = torch.isfinite(target_normals).all(dim=1, keepdim=True)
+        target_valid &= target_magnitude > 1e-6
+        target_normals = torch.where(
+            target_valid, target_normals, torch.zeros_like(target_normals)
+        )
+        target_normals = F.normalize(target_normals, dim=1, eps=1e-6)
 
-        polar_mask = normal_valid & (observed_rho >= self.min_dolp)
+        # SfP-Wild uses +left,+down,+forward while the calibrated pinhole
+        # geometry uses +right,+down,+forward. Compare in SfP-Wild coordinates.
+        predicted_sfp_normals = torch.cat(
+            (-normals[:, 0:1], normals[:, 1:]), dim=1
+        )
+        cosine = (predicted_sfp_normals * target_normals).sum(
+            dim=1, keepdim=True
+        ).clamp(-1.0, 1.0)
+        normal_error = 1.0 - cosine
+        normal_mask = normal_valid & target_valid
         if pixel_valid is not None:
-            polar_mask &= pixel_valid.reshape(batch * views, 1, height, width).bool()
+            normal_mask &= pixel_valid.reshape(batch * views, 1, height, width).bool()
         if view_valid is not None:
-            polar_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
-        # Higher DoLP carries a better-conditioned angle measurement. Detach
-        # because this is observed confidence, not a prediction target.
-        polar_confidence = observed_rho.detach().clamp_min(self.min_dolp)
-        polar_loss = _masked_mean(polar_error, polar_mask * polar_confidence)
-        polar_phase_loss = _masked_mean(phase_error, polar_mask * polar_confidence)
-        polar_dolp_loss = _masked_mean(dolp_error, polar_mask * polar_confidence)
+            normal_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
+        normal_consistency_loss = _masked_mean(normal_error, normal_mask)
 
         depth_mask = (
             depth_supervision_mask & torch.isfinite(sparse) & (sparse > 0)
@@ -542,17 +489,16 @@ class PolarDepthSelfSupervision(nn.Module):
         )
 
         total = (
-            self.polar_weight * polar_loss
+            self.normal_weight * normal_consistency_loss
             + self.sparse_depth_weight * sparse_depth_loss
             + self.smoothness_weight * smoothness_loss
         )
         output.update({
             "loss": total,
-            "polar_loss": polar_loss,
-            "polar_phase_loss": polar_phase_loss,
-            "polar_dolp_loss": polar_dolp_loss,
+            "normal_consistency_loss": normal_consistency_loss,
             "sparse_depth_loss": sparse_depth_loss,
             "smoothness_loss": smoothness_loss,
             "predicted_normals": normals.reshape(batch, views, 3, height, width),
+            "sfp_normals": target_normals.reshape(batch, views, 3, height, width),
         })
         return output

@@ -53,9 +53,7 @@ class VLATrainer(Trainer):
         if getattr(self.model.config, "use_polar_depth_self_supervision", False):
             self.meta_losses = self.meta_losses + (
                 "polar_depth_self_supervision_loss",
-                "polar_consistency_loss",
-                "polar_phase_loss",
-                "polar_dolp_loss",
+                "normal_consistency_loss",
                 "sparse_depth_consistency_loss",
                 "depth_smoothness_loss",
             )

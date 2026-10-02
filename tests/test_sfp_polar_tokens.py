@@ -99,6 +99,33 @@ class SfpEncoderTest(unittest.TestCase):
 
 
 class PolarRouterTest(unittest.TestCase):
+    def test_all_mode_repeats_every_sample_token_for_each_group(self):
+        features = torch.arange(
+            2 * 2 * 3, dtype=torch.float32
+        ).reshape(1, 2, 2, 3, 1)
+        coords = torch.tensor([
+            [100.0, 0.0, -1.0],
+            [200.0, 0.0, -1.0],
+            [300.0, 0.0, -1.0],
+        ])
+        point = make_route_point(
+            features,
+            coords,
+            torch.zeros(3, dtype=torch.long),
+            view_valid=torch.tensor([[True, True]]),
+        )
+        routes = PolarTokenRouter(
+            0, neighbor_radius=0, max_tokens=1, mode="all"
+        )(
+            point,
+            torch.tensor([0, 1, 2]),
+            torch.tensor([2, 1]),
+        )
+        self.assertEqual([len(route.features) for route in routes], [12, 12])
+        self.assertTrue(torch.equal(routes[0].features, routes[1].features))
+        self.assertTrue(torch.equal(routes[0].features[:, 0], features.flatten()))
+        self.assertEqual(point["polar_route_stats"][0]["mode"], "all")
+
     def test_exact_feature_centers_and_filters(self):
         self.assertEqual([sfp_feature_geometry(i) for i in range(5)],
                          [(1, 0.0), (2, 0.5), (4, 1.5), (8, 3.5), (16, 7.5)])

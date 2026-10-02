@@ -143,6 +143,7 @@ class PointTransformerUnetWithAction(nn.Module):
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
+        polar_token_mode="local",
     ):
         super().__init__()
 
@@ -182,6 +183,7 @@ class PointTransformerUnetWithAction(nn.Module):
             polar_neighbor_radius=polar_neighbor_radius,
             polar_max_tokens_per_group=polar_max_tokens_per_group,
             polar_max_views=polar_max_views,
+            polar_token_mode=polar_token_mode,
         )
         self.auxiliary_decoder = auxiliary_decoder
         self.enc_channels = enc_channels

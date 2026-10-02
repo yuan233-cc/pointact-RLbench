@@ -77,15 +77,6 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --sfp_feature_levels x1 x2 x3 x4 x5 \
     --polar_neighbor_radius "${POLAR_NEIGHBOR_RADIUS:-1}" \
     --polar_max_tokens_per_group "${POLAR_MAX_TOKENS_PER_GROUP:-32}" \
+    --polar_token_mode "${POLAR_TOKEN_MODE:-local}" \
     --polar_max_views 1 --polar_writeback False \
-    --use_polar_depth_self_supervision True \
-    --polar_depth_loss_weight "${POLAR_DEPTH_LOSS_WEIGHT:-0.1}" \
-    --polar_consistency_weight "${POLAR_CONSISTENCY_WEIGHT:-1.0}" \
-    --sparse_depth_consistency_weight "${SPARSE_DEPTH_WEIGHT:-1.0}" \
-    --depth_smoothness_weight "${DEPTH_SMOOTHNESS_WEIGHT:-0.01}" \
-    --polar_refractive_index "${POLAR_REFRACTIVE_INDEX:-1.5}" \
-    --polar_min_dolp "${POLAR_MIN_DOLP:-0.02}" \
-    --polar_dolp_weight "${POLAR_DOLP_WEIGHT:-0.25}" \
-    --polar_depth_keep_probability "${POLAR_DEPTH_KEEP_PROBABILITY:-0.7}" \
-    --polar_depth_min "${POLAR_DEPTH_MIN:-0.05}" \
-    --polar_depth_max "${POLAR_DEPTH_MAX:-4.5}"
+    --use_polar_depth_self_supervision False

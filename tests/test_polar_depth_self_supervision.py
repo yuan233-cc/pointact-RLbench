@@ -4,7 +4,6 @@ from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision imp
     PolarDepthSelfSupervision,
     PolarPointDepthDecoder,
     depth_to_normals,
-    fresnel_dolp,
     mask_points_at_depth_targets,
     rasterize_fused_point_features,
 )
@@ -31,16 +30,6 @@ def _point_maps(batch=1, views=1, height=32, width=32, requires_grad=False):
     )
     masks = tuple(torch.ones_like(level[:, :, :1], dtype=torch.bool) for level in maps)
     return maps, masks
-
-
-def test_fresnel_dolp_is_finite_and_zero_at_normal_incidence():
-    cosine = torch.tensor([1.0, 0.8, 0.2])
-    diffuse, specular = fresnel_dolp(cosine, refractive_index=1.5)
-    torch.testing.assert_close(diffuse[0], torch.tensor(0.0), atol=1e-7, rtol=0)
-    torch.testing.assert_close(specular[0], torch.tensor(0.0), atol=1e-7, rtol=0)
-    assert torch.isfinite(diffuse).all() and torch.isfinite(specular).all()
-    assert ((diffuse >= 0) & (diffuse <= 1)).all()
-    assert ((specular >= 0) & (specular <= 1)).all()
 
 
 def test_depth_normals_face_the_camera_and_are_differentiable():
@@ -128,6 +117,9 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
     sparse = torch.zeros(1, 1, 1, height, width)
     sparse[:, :, :, 4::8, 4::8] = 1.0
     valid = sparse > 0
+    sfp_normals = torch.zeros(1, 1, 3, height, width)
+    sfp_normals[:, :, 2] = -1.0
+    sfp_normals.requires_grad_()
     objective = PolarDepthSelfSupervision(
         POLAR_CHANNELS, POINT_CHANNELS, min_depth=0.05, max_depth=3.0
     )
@@ -141,14 +133,16 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
         valid,
         pixel_valid=torch.ones(1, 1, height, width, dtype=torch.bool),
         view_valid=torch.ones(1, 1, dtype=torch.bool),
+        sfp_normals=sfp_normals,
     )
     assert result["predicted_depth"].shape == sparse.shape
     assert result["predicted_normals"].shape == (1, 1, 3, height, width)
     for name in (
-        "loss", "polar_loss", "polar_phase_loss", "polar_dolp_loss",
+        "loss", "normal_consistency_loss",
         "sparse_depth_loss", "smoothness_loss",
     ):
         assert torch.isfinite(result[name])
     result["loss"].backward()
     assert objective.decoder.depth_head.weight.grad is not None
     assert all(level.grad is not None for level in point_levels)
+    assert sfp_normals.grad is None
