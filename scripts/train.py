@@ -76,11 +76,31 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
 
     model_class = _import_object(recipe.model_class)
     config = None
-    if (training_args.use_polar_material_conditioning
+    if (training_args.polar_enabled
+            or training_args.use_polar_material_conditioning
             or training_args.use_target_reconstruction
             or training_args.use_polar_depth_self_supervision):
         config_class = _import_object(recipe.config_class)
         overrides = {}
+        if training_args.polar_enabled:
+            overrides.update(
+                polar_enabled=True,
+                polar_backbone=training_args.polar_backbone,
+                sfp_checkpoint=training_args.sfp_checkpoint,
+                sfp_freeze=training_args.sfp_freeze,
+                sfp_allow_random_init=training_args.sfp_allow_random_init,
+                cga_checkpoint=training_args.cga_checkpoint,
+                cga_freeze=training_args.cga_freeze,
+                cga_allow_random_init=training_args.cga_allow_random_init,
+                cga_residual_blocks=training_args.cga_residual_blocks,
+                cga_dino_normal_checkpoint=training_args.cga_dino_normal_checkpoint,
+                dinov3_weights=training_args.dinov3_weights,
+                cga_dino_use_dino=training_args.cga_dino_use_dino,
+                polar_neighbor_radius=training_args.polar_neighbor_radius,
+                polar_max_tokens_per_group=training_args.polar_max_tokens_per_group,
+                polar_max_views=training_args.polar_max_views,
+                polar_token_mode=training_args.polar_token_mode,
+            )
         if training_args.use_polar_material_conditioning:
             overrides["use_polar_material_conditioning"] = True
         if training_args.use_target_reconstruction:

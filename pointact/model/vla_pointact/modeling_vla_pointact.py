@@ -25,6 +25,10 @@ from pointact.model.vla_pointact.action_head_3d.cga_transformer_encoder import (
     CgaTransformerFeatureEncoder,
     load_cga_transformer_checkpoint,
 )
+from pointact.model.vla_pointact.action_head_3d.cga_dino_normal import (
+    CgaDinoNormalNet,
+    load_cga_dino_normal_checkpoint,
+)
 from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision import (
     PolarDepthSelfSupervision,
     mask_points_at_depth_targets,
@@ -195,6 +199,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
         polar_images: torch.Tensor | None = None,
+        polar_rgb: torch.Tensor | None = None,
+        polar_physical_prior: torch.Tensor | None = None,
         polar_K: torch.Tensor | None = None,
         T_camera_from_model: torch.Tensor | None = None,
         T_model_from_world: torch.Tensor | None = None,
@@ -259,6 +265,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
                 polar_images=polar_images,
+                polar_rgb=polar_rgb,
+                polar_physical_prior=polar_physical_prior,
                 polar_K=polar_K,
                 T_camera_from_model=T_camera_from_model,
                 view_valid=view_valid,
@@ -306,6 +314,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
                 polar_images=polar_images,
+                polar_rgb=polar_rgb,
+                polar_physical_prior=polar_physical_prior,
                 polar_K=polar_K,
                 T_camera_from_model=T_camera_from_model,
                 view_valid=view_valid,
@@ -392,6 +402,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
         polar_images: torch.Tensor | None = None,
+        polar_rgb: torch.Tensor | None = None,
+        polar_physical_prior: torch.Tensor | None = None,
         polar_K: torch.Tensor | None = None,
         T_camera_from_model: torch.Tensor | None = None,
         view_valid: torch.Tensor | None = None,
@@ -446,6 +458,8 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             material_candidate_mask=material_candidate_mask,
             point_pixel_indices=point_pixel_indices,
             polar_images=polar_images,
+            polar_rgb=polar_rgb,
+            polar_physical_prior=polar_physical_prior,
             polar_K=polar_K,
             T_camera_from_model=T_camera_from_model,
             view_valid=view_valid,
@@ -1003,8 +1017,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                         "cga_allow_random_init=True for an explicit from-scratch run"
                     )
                 self.cga_encoder = CgaTransformerFeatureEncoder(
-                    residual_num=self.config.cga_residual_blocks
+                    residual_num=self.config.cga_residual_blocks,
+                    observation_channels=7,
+                    physical_prior_channels=11,
                 )
+            elif self.config.polar_backbone == "cga_dinov3_normal":
+                # Construct after ``post_init`` so Hugging Face initialization
+                # cannot overwrite the already loaded DINOv3 weights.
+                pass
             else:
                 raise ValueError(f"Unsupported polar_backbone={self.config.polar_backbone!r}")
         if self.config.use_polar_depth_self_supervision:
@@ -1066,6 +1086,20 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         )
     
         self.post_init()
+        if self.config.polar_enabled and self.config.polar_backbone == "cga_dinov3_normal":
+            normal_kwargs = {
+                "observation_channels": 7,
+                "physical_prior_channels": 11,
+                "transformer_blocks": self.config.cga_residual_blocks,
+                "use_dino": self.config.cga_dino_use_dino,
+            }
+            if self.config.cga_dino_use_dino:
+                self.cga_dino_encoder = CgaDinoNormalNet.from_dinov3(
+                    self.config.dinov3_weights,
+                    **normal_kwargs,
+                )
+            else:
+                self.cga_dino_encoder = CgaDinoNormalNet(None, **normal_kwargs)
         if self.config.use_polar_depth_self_supervision:
             with torch.no_grad():
                 # Preserve the baseline action path at initialization. The
@@ -1098,6 +1132,15 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 self.cga_encoder, self.config.cga_checkpoint
             )
             logger.info("Loaded CGA-Transformer checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "cga_dinov3_normal"
+            and self.config.cga_dino_normal_checkpoint is not None
+        ):
+            load_report = load_cga_dino_normal_checkpoint(
+                self.cga_dino_encoder, self.config.cga_dino_normal_checkpoint
+            )
+            logger.info("Loaded CGA+DINO normal checkpoint: %s", load_report)
         if self.config.polar_enabled and self._polar_encoder_frozen():
             self._polar_encoder().requires_grad_(False)
             self._polar_encoder().eval()
@@ -1107,7 +1150,9 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
     def _polar_encoder(self):
         if self.config.polar_backbone == "sfp_wild":
             return self.sfp_encoder
-        return self.cga_encoder
+        if self.config.polar_backbone == "cga_transformer":
+            return self.cga_encoder
+        return self.cga_dino_encoder
 
     def _polar_encoder_frozen(self):
         if self.config.polar_backbone == "sfp_wild":
@@ -1147,7 +1192,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
     def _build_polar_context(self, batch_size, **kwargs):
         names = (
             "polar_images", "polar_K", "T_camera_from_model", "view_valid",
-            "pixel_valid", "polar_pixel_transform",
+            "pixel_valid", "polar_pixel_transform", "polar_rgb", "polar_physical_prior",
         )
         values = {name: kwargs.get(name) for name in names}
         if not self.config.polar_enabled:
@@ -1161,27 +1206,50 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         images = values["polar_images"]
         if images.ndim != 5 or images.shape[0] != batch_size or images.shape[2] != 7:
             raise ValueError("polar_images must be [B,V,7,H,W] and match the action batch")
-        B, V, _, height, width = images.shape
-        if values["polar_K"].shape != (B, V, 3, 3):
+        batch, views, _, height, width = images.shape
+        if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
+            prior = values["polar_physical_prior"]
+            if prior is None:
+                raise ValueError(
+                    f"polar_backbone={self.config.polar_backbone!r} requires "
+                    "polar_physical_prior [B,V,11,H,W]"
+                )
+            if prior.shape != (batch, views, 11, height, width):
+                raise ValueError("polar_physical_prior must be [B,V,11,H,W]")
+        if self.config.polar_backbone == "cga_dinov3_normal" and self.config.cga_dino_use_dino:
+            rgb = values["polar_rgb"]
+            if rgb is None or rgb.shape != (batch, views, 3, height, width):
+                raise ValueError("cga_dinov3_normal requires aligned polar_rgb [B,V,3,H,W]")
+        if values["polar_K"].shape != (batch, views, 3, 3):
             raise ValueError("polar_K must be [B,V,3,3]")
-        if values["T_camera_from_model"].shape != (B, V, 4, 4):
+        if values["T_camera_from_model"].shape != (batch, views, 4, 4):
             raise ValueError("T_camera_from_model must be [B,V,4,4]")
-        if values["view_valid"].shape != (B, V):
+        if values["view_valid"].shape != (batch, views):
             raise ValueError("view_valid must be [B,V]")
         encoder = self._polar_encoder()
         encoder_dtype = next(encoder.parameters()).dtype
-        flat_images = images.reshape(B * V, 7, height, width).to(encoder_dtype)
+        flat_images = images.reshape(batch * views, 7, height, width).to(encoder_dtype)
+        encoder_args = [flat_images]
+        if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
+            encoder_args.append(
+                values["polar_physical_prior"].reshape(batch * views, 11, height, width).to(encoder_dtype)
+            )
+        if self.config.polar_backbone == "cga_dinov3_normal":
+            flat_rgb = None
+            if self.config.cga_dino_use_dino:
+                flat_rgb = values["polar_rgb"].reshape(batch * views, 3, height, width).to(encoder_dtype)
+            encoder_args.append(flat_rgb)
         if self._polar_encoder_frozen():
             with torch.no_grad():
-                flat_levels = encoder.forward_features(flat_images)
+                flat_levels = encoder.forward_features(*encoder_args)
         else:
-            flat_levels = encoder.forward_features(flat_images)
+            flat_levels = encoder.forward_features(*encoder_args)
         levels = tuple(
-            level.reshape(B, V, *level.shape[1:]) for level in flat_levels
+            level.reshape(batch, views, *level.shape[1:]) for level in flat_levels
         )
         image_hw = torch.tensor(
             [height, width], device=images.device, dtype=torch.long
-        ).expand(B, V, 2)
+        ).expand(batch, views, 2)
         context = {
             "polar_feature_levels": levels,
             "polar_K": values["polar_K"],
@@ -1190,7 +1258,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             "polar_image_hw": image_hw,
         }
         if values["pixel_valid"] is not None:
-            if values["pixel_valid"].shape != (B, V, height, width):
+            if values["pixel_valid"].shape != (batch, views, height, width):
                 raise ValueError("pixel_valid must be [B,V,H,W]")
             context["pixel_valid"] = values["pixel_valid"].bool()
         if values["polar_pixel_transform"] is not None:

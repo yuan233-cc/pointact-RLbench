@@ -1,0 +1,30 @@
+data:
+  train_manifest: /path/to/train_manifest.json
+  val_manifest: /path/to/val_manifest.json
+  input_mode: native_cga
+  image_size: 256
+  require_calibration: true
+  normal_gt_source: public_dataset_gt
+  normal_sign: 1.0
+  normal_transform:
+    - [1.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0]
+    - [0.0, 0.0, 1.0]
+  overfit_samples: null
+
+model:
+  use_dino: false
+  transformer_blocks: 8
+  transformer_dropout: 0.0
+
+training:
+  output_dir: outputs/cga_only_normal
+  seed: 0
+  device: cuda
+  epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  num_workers: 4
+  learning_rate: 1.0e-4
+  step_size: 10
+  gamma: 0.5

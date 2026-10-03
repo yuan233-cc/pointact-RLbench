@@ -107,7 +107,8 @@ class MonolithicPrompt:
             sources["npoints_in_batch"] = points.size(0)
             for key in (
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
-                "target_points", "target_input_mask", "polar_images", "polar_K",
+                "target_points", "target_input_mask", "polar_images", "polar_rgb",
+                "polar_physical_prior", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
                 "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):
@@ -147,7 +148,8 @@ class DualPrompt:
             sources["npoints_in_batch"] = len(points)
             for key in (
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
-                "target_points", "target_input_mask", "polar_images", "polar_K",
+                "target_points", "target_input_mask", "polar_images", "polar_rgb",
+                "polar_physical_prior", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
                 "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):
@@ -437,7 +439,8 @@ class SupervisedDataset(Dataset):
             data_dict["npoints_in_batch"] = sources.get("npoints_in_batch", len(points))
             for key in (
                 "material_rgb", "polar_dense", "material_candidates", "point_pixel_indices",
-                "target_points", "target_input_mask", "polar_images", "polar_K",
+                "target_points", "target_input_mask", "polar_images", "polar_rgb",
+                "polar_physical_prior", "polar_K",
                 "T_camera_from_model", "T_model_from_world", "view_valid", "pixel_valid",
                 "polar_pixel_transform", "observed_depth", "observed_depth_valid",
             ):

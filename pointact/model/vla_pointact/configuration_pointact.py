@@ -50,7 +50,10 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         cga_checkpoint=None,
         cga_freeze=False,
         cga_allow_random_init=False,
-        cga_residual_blocks=16,
+        cga_residual_blocks=8,
+        cga_dino_normal_checkpoint=None,
+        dinov3_weights=None,
+        cga_dino_use_dino=True,
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
@@ -119,6 +122,9 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.cga_freeze = cga_freeze
         self.cga_allow_random_init = cga_allow_random_init
         self.cga_residual_blocks = cga_residual_blocks
+        self.cga_dino_normal_checkpoint = cga_dino_normal_checkpoint
+        self.dinov3_weights = dinov3_weights
+        self.cga_dino_use_dino = cga_dino_use_dino
         self.polar_neighbor_radius = polar_neighbor_radius
         self.polar_max_tokens_per_group = polar_max_tokens_per_group
         self.polar_max_views = polar_max_views
@@ -137,9 +143,10 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 raise ValueError(
                     "Polar joint attention supports concerto or utonia encoder-only PointACT"
                 )
-            if polar_backbone not in ("sfp_wild", "cga_transformer"):
+            if polar_backbone not in ("sfp_wild", "cga_transformer", "cga_dinov3_normal"):
                 raise ValueError(
-                    "polar_backbone must be 'sfp_wild' or 'cga_transformer'"
+                    "polar_backbone must be 'sfp_wild', 'cga_transformer', or "
+                    "'cga_dinov3_normal'"
                 )
             if list(sfp_feature_levels) != ["x1", "x2", "x3", "x4", "x5"]:
                 raise ValueError("The supported stage mapping is exactly x1..x5")
@@ -149,6 +156,16 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 raise ValueError("polar_token_mode must be 'local' or 'all'")
         if cga_residual_blocks < 0:
             raise ValueError("cga_residual_blocks must be non-negative")
+        if polar_enabled and polar_backbone == "cga_dinov3_normal":
+            if cga_dino_use_dino and not dinov3_weights:
+                raise ValueError(
+                    "cga_dinov3_normal with DINO enabled requires dinov3_weights"
+                )
+            if cga_dino_normal_checkpoint is None and not cga_allow_random_init:
+                raise ValueError(
+                    "cga_dinov3_normal requires cga_dino_normal_checkpoint; use "
+                    "cga_allow_random_init=True only for explicit from-scratch tests"
+                )
         if use_polar_depth_self_supervision and not polar_enabled:
             raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
         if use_polar_depth_self_supervision and polar_backbone != "sfp_wild":

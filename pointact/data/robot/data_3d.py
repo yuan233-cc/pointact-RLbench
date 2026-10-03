@@ -300,6 +300,21 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             i_un = np.asarray(record["I_un"])
             K = np.asarray(record["K"], dtype=np.float32)
             camera_from_world = np.asarray(record["T_camera_from_world"], dtype=np.float32)
+            prior = np.asarray(record["physical_prior"], dtype=np.float32) if "physical_prior" in record else None
+            if prior is None and all(key in record for key in ("est", "spec")):
+                prior = np.concatenate(
+                    (
+                        np.asarray(record["est"], dtype=np.float32),
+                        np.asarray(record["I_un"], dtype=np.float32)[None],
+                        np.asarray(record["spec"], dtype=np.float32).reshape(1, *i_un.shape),
+                    ),
+                    axis=0,
+                )
+            rgb = None
+            for rgb_key in ("rgb", "RGB", "color"):
+                if rgb_key in record:
+                    rgb = np.asarray(record[rgb_key]).copy()
+                    break
         if i_un.ndim != 2:
             raise ValueError(f"SfP I_un must be HxW, got {i_un.shape}")
         i_un = i_un.astype(np.float32) / 255.0 if i_un.dtype == np.uint8 else i_un.astype(np.float32)
@@ -313,13 +328,27 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError("SfP I_un contains non-finite values")
         rays = self._viewing_directions(K, *i_un.shape)
         polar_images = np.concatenate((i_un[None], dense_polar[:3], rays), axis=0)
-        return {
+        result = {
             "polar_images": torch.from_numpy(polar_images[None].copy()),
             "polar_K": torch.from_numpy(K[None].copy()),
             "T_camera_from_world": torch.from_numpy(camera_from_world[None].copy()),
             "view_valid": torch.ones(1, dtype=torch.bool),
             "pixel_valid": torch.from_numpy((dense_polar[3:4] > 0.5).copy()),
         }
+        if prior is not None:
+            if prior.shape != (11, *i_un.shape):
+                raise ValueError(f"CGA physical_prior must be [11,H,W], got {prior.shape}")
+            result["polar_physical_prior"] = torch.from_numpy(prior[None].copy())
+        if rgb is not None:
+            if rgb.ndim == 3 and rgb.shape[-1] == 3:
+                rgb = rgb.transpose(2, 0, 1)
+            if rgb.shape != (3, *i_un.shape):
+                raise ValueError(f"CGA+DINO RGB must be [3,H,W], got {rgb.shape}")
+            rgb = rgb.astype(np.float32)
+            if rgb.max() > 1:
+                rgb /= 255.0
+            result["polar_rgb"] = torch.from_numpy(rgb[None].copy())
+        return result
 
     def set_feature_keys(
         self, video_keys=None, state_keys=None, action_keys=None,
@@ -608,7 +637,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             ordered_keys += ["target_points", "target_input_mask"]
         if "polar_images" in item:
             ordered_keys += [
-                "polar_images", "polar_K", "T_camera_from_model", "T_model_from_world",
+                "polar_images", "polar_rgb", "polar_physical_prior", "polar_K",
+                "T_camera_from_model", "T_model_from_world",
                 "view_valid", "pixel_valid", "polar_pixel_transform",
             ]
         if "observed_depth" in item:

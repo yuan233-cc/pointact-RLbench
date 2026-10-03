@@ -140,7 +140,10 @@ class DataCollator(DefaultDataCollator):
             raise ValueError("Cannot mix Polar-token and baseline examples in one batch")
         if all(has_polar):
             required = ("polar_images", "polar_K", "T_camera_from_model", "view_valid")
-            optional = ("T_model_from_world", "pixel_valid", "polar_pixel_transform")
+            optional = (
+                "T_model_from_world", "pixel_valid", "polar_pixel_transform",
+                "polar_rgb", "polar_physical_prior",
+            )
             for key in required:
                 if any(key not in example for example in examples):
                     raise ValueError(f"Polar-token examples require {key}")

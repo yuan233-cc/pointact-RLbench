@@ -237,6 +237,9 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                 raise ValueError(f"Polar inference inputs are missing {missing}")
             for key in required:
                 inputs[key] = torch.as_tensor(batch[key]).to(device)
+            for key in ("polar_rgb", "polar_physical_prior"):
+                if key in batch:
+                    inputs[key] = torch.as_tensor(batch[key]).to(device)
             if "T_camera_from_world" in batch:
                 camera_from_world = torch.as_tensor(batch["T_camera_from_world"], dtype=torch.float32)
                 centers = torch.as_tensor(np.stack(batch_point_centers), dtype=torch.float32)

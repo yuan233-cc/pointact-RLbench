@@ -3,12 +3,11 @@
 The encoder core is adapted from the MIT-licensed CGA-Transformer project:
 https://github.com/singobl/CGA-Transformer
 
-The published network consumes two eleven-channel, application-specific
-physical branches.  PointACT's aligned dataset stores the seven channels used
-by its existing SfP-Wild path.  Two learned 1x1 adapters map those channels to
-the two CGA branches; the CGA fusion, U-Net encoder, and bottleneck transformer
-then follow the published architecture.  This keeps the existing calibrated
-point/pixel routing and reconstruction decoder unchanged.
+The published network consumes two distinct application-specific branches.
+The observation and physical-prior tensors are therefore always separate
+arguments.  In robot compatibility mode independent stems only align their
+channel dimensions; a stem never synthesizes candidate normals from the
+observation branch.
 """
 
 from __future__ import annotations
@@ -17,19 +16,25 @@ from pathlib import Path
 from typing import Mapping
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 
 class _DoubleConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, norm: str = "in"):
         super().__init__()
+        if norm == "bn":
+            norm_layer = nn.BatchNorm2d
+        elif norm == "in":
+            norm_layer = nn.InstanceNorm2d
+        else:
+            raise ValueError(f"Unsupported CGA normalization {norm!r}")
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, 3, padding=1),
-            nn.InstanceNorm2d(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, 3, padding=1),
-            nn.InstanceNorm2d(out_channels),
+            norm_layer(out_channels),
             nn.ReLU(inplace=True),
         )
 
@@ -38,11 +43,11 @@ class _DoubleConv(nn.Module):
 
 
 class _Down(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, in_channels: int, out_channels: int, norm: str = "in"):
         super().__init__()
         self.maxpool_conv = nn.Sequential(
             nn.MaxPool2d(2),
-            _DoubleConv(in_channels, out_channels),
+            _DoubleConv(in_channels, out_channels, norm=norm),
         )
 
     def forward(self, x: Tensor) -> Tensor:
@@ -160,38 +165,67 @@ class _TransformerBlock(nn.Module):
 
 
 class CgaTransformerFeatureEncoder(nn.Module):
-    """Return five calibrated feature grids from PointACT's polar input."""
+    """Return five feature grids from genuine CGA observation/prior branches."""
 
     feature_channels = (64, 128, 256, 512, 512)
-    input_channels = 7
     cga_channels = 11
 
-    def __init__(self, residual_num: int = 16, dropout: float = 0.0):
+    def __init__(
+        self,
+        residual_num: int = 8,
+        dropout: float = 0.0,
+        observation_channels: int = 11,
+        physical_prior_channels: int = 11,
+        fusion_channels: int = 11,
+    ):
         super().__init__()
         if residual_num < 0:
             raise ValueError("residual_num must be non-negative")
-        self.signal_adapter = nn.Conv2d(self.input_channels, self.cga_channels, 1)
-        self.physical_prior_adapter = nn.Conv2d(
-            self.input_channels, self.cga_channels, 1
+        if min(observation_channels, physical_prior_channels, fusion_channels) <= 0:
+            raise ValueError("CGA branch channel counts must be positive")
+        self.observation_channels = observation_channels
+        self.physical_prior_channels = physical_prior_channels
+        self.fusion_channels = fusion_channels
+        self.observation_stem = self._make_stem(observation_channels, fusion_channels)
+        self.physical_prior_stem = self._make_stem(
+            physical_prior_channels, fusion_channels
         )
-        self.fusion = _CgaFusion(self.cga_channels)
-        self.inc = _DoubleConv(self.cga_channels, 64)
-        self.down1 = _Down(64, 128)
-        self.down2 = _Down(128, 256)
-        self.down3 = _Down(256, 512)
-        self.down4 = _Down(512, 512)
+        self.fusion = _CgaFusion(fusion_channels)
+        # Match the released CGA implementation: the first block uses its
+        # BatchNorm default while down1..down4 receive norm='in'.
+        self.inc = _DoubleConv(fusion_channels, 64, norm="bn")
+        self.down1 = _Down(64, 128, norm="in")
+        self.down2 = _Down(128, 256, norm="in")
+        self.down3 = _Down(256, 512, norm="in")
+        self.down4 = _Down(512, 512, norm="in")
         self.resblock_layers = nn.ModuleList(
             _TransformerBlock(512, dropout=dropout) for _ in range(residual_num)
         )
 
-    def forward_features(self, images: Tensor) -> tuple[Tensor, ...]:
-        if images.ndim != 4 or images.shape[1] != self.input_channels:
-            raise ValueError("CGA polar input must be [N,7,H,W]")
-        if min(images.shape[-2:]) < 32:
+    @staticmethod
+    def _make_stem(in_channels: int, out_channels: int) -> nn.Module:
+        return nn.Identity() if in_channels == out_channels else nn.Conv2d(in_channels, out_channels, 1)
+
+    def forward_features(
+        self, observation: Tensor, physical_prior: Tensor
+    ) -> tuple[Tensor, ...]:
+        if observation.ndim != 4 or observation.shape[1] != self.observation_channels:
+            raise ValueError(
+                "CGA observation must be [N,"
+                f"{self.observation_channels},H,W], got {tuple(observation.shape)}"
+            )
+        if physical_prior.ndim != 4 or physical_prior.shape[1] != self.physical_prior_channels:
+            raise ValueError(
+                "CGA physical prior must be [N,"
+                f"{self.physical_prior_channels},H,W], got {tuple(physical_prior.shape)}"
+            )
+        if observation.shape[0] != physical_prior.shape[0] or observation.shape[-2:] != physical_prior.shape[-2:]:
+            raise ValueError("CGA observation and physical prior must be batch/spatially aligned")
+        if min(observation.shape[-2:]) < 32:
             raise ValueError("CGA polar input height and width must both be at least 32")
-        signal = self.signal_adapter(images)
-        physical_prior = self.physical_prior_adapter(images)
-        fused = self.fusion(signal, physical_prior)
+        signal = self.observation_stem(observation)
+        prior = self.physical_prior_stem(physical_prior)
+        fused = self.fusion(signal, prior)
         x1 = self.inc(fused)
         x2 = self.down1(x1)
         x3 = self.down2(x2)
@@ -204,8 +238,10 @@ class CgaTransformerFeatureEncoder(nn.Module):
         x5 = tokens.transpose(1, 2).reshape(batch, channels, height, width)
         return x1, x2, x3, x4, x5
 
-    def forward(self, images: Tensor) -> tuple[Tensor, ...]:
-        return self.forward_features(images)
+    def forward(
+        self, observation: Tensor, physical_prior: Tensor
+    ) -> tuple[Tensor, ...]:
+        return self.forward_features(observation, physical_prior)
 
 
 def _checkpoint_state_dict(checkpoint) -> Mapping[str, Tensor]:
