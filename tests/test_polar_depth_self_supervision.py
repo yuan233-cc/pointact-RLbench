@@ -67,6 +67,36 @@ def test_point_feature_rasterizer_preserves_gradient_path():
     assert all(stage["feat"].grad is not None for stage in stage_points)
 
 
+def test_point_feature_rasterizer_uses_encoder_feature_offsets():
+    levels = _features(height=16, width=16)
+    stage_points = tuple({
+        "feat": torch.ones(1, channels),
+        "coord": torch.tensor([[3.0, 3.0, 1.0]]),
+        "batch": torch.zeros(1, dtype=torch.long),
+    } for channels in POINT_CHANNELS)
+    common = dict(
+        stage_points=stage_points,
+        feature_levels=levels,
+        intrinsics=torch.eye(3)[None, None],
+        transforms=torch.eye(4)[None, None],
+        image_hw=torch.tensor([[[16, 16]]]),
+        view_valid=torch.ones(1, 1, dtype=torch.bool),
+    )
+    _, tasknet_masks = rasterize_fused_point_features(
+        **common,
+        feature_strides=(1, 2, 4, 8, 16),
+        feature_offsets=(0, 0, 0, 0, 0),
+    )
+    _, legacy_masks = rasterize_fused_point_features(**common)
+
+    # At stride 2, TaskNet's padding keeps the center at zero, whereas the
+    # legacy 2x2 MaxPool grid has a 0.5-pixel center offset.
+    assert tasknet_masks[1][0, 0, 0, 2, 2]
+    assert legacy_masks[1][0, 0, 0, 1, 1]
+    assert not tasknet_masks[1][0, 0, 0, 1, 1]
+    assert not legacy_masks[1][0, 0, 0, 2, 2]
+
+
 def test_depth_targets_are_removed_before_pointact():
     points = torch.tensor([
         [0.0, 0.0, 1.0, 1.0],
@@ -82,6 +112,29 @@ def test_depth_targets_are_removed_before_pointact():
     )
     assert keep_mask.tolist() == [False, True, True]
     assert counts.tolist() == [2]
+    torch.testing.assert_close(kept, points[1:])
+
+
+def test_depth_target_removal_matches_v2_floor_pixel_convention():
+    points = torch.tensor([
+        [1.75, 1.75, 1.0, 1.0],
+        [0.25, 0.25, 1.0, 2.0],
+    ])
+    target = torch.zeros(1, 1, 1, 4, 4, dtype=torch.bool)
+    target[0, 0, 0, 1, 1] = True
+    kept, counts, keep_mask = mask_points_at_depth_targets(
+        points,
+        torch.tensor([2]),
+        target,
+        torch.eye(3)[None, None],
+        torch.eye(4)[None, None],
+        torch.ones(1, 1, dtype=torch.bool),
+    )
+
+    # V2 stores (1.75, 1.75) in floor cell (1, 1). Nearest rounding would
+    # incorrectly look at (2, 2) and leak this held-out source point.
+    assert keep_mask.tolist() == [False, True]
+    assert counts.tolist() == [1]
     torch.testing.assert_close(kept, points[1:])
 
 
@@ -117,9 +170,9 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
     sparse = torch.zeros(1, 1, 1, height, width)
     sparse[:, :, :, 4::8, 4::8] = 1.0
     valid = sparse > 0
-    sfp_normals = torch.zeros(1, 1, 3, height, width)
-    sfp_normals[:, :, 2] = -1.0
-    sfp_normals.requires_grad_()
+    normal_targets = torch.zeros(1, 1, 3, height, width)
+    normal_targets[:, :, 2] = -1.0
+    normal_targets.requires_grad_()
     objective = PolarDepthSelfSupervision(
         POLAR_CHANNELS, POINT_CHANNELS, min_depth=0.05, max_depth=3.0
     )
@@ -133,10 +186,11 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
         valid,
         pixel_valid=torch.ones(1, 1, height, width, dtype=torch.bool),
         view_valid=torch.ones(1, 1, dtype=torch.bool),
-        sfp_normals=sfp_normals,
+        normal_targets=normal_targets,
     )
     assert result["predicted_depth"].shape == sparse.shape
     assert result["predicted_normals"].shape == (1, 1, 3, height, width)
+    torch.testing.assert_close(result["normal_targets"], result["sfp_normals"])
     for name in (
         "loss", "normal_consistency_loss",
         "sparse_depth_loss", "smoothness_loss",
@@ -145,4 +199,4 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
     result["loss"].backward()
     assert objective.decoder.depth_head.weight.grad is not None
     assert all(level.grad is not None for level in point_levels)
-    assert sfp_normals.grad is None
+    assert normal_targets.grad is None

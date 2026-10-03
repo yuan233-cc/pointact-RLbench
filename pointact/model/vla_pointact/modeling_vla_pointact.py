@@ -29,6 +29,10 @@ from pointact.model.vla_pointact.action_head_3d.cga_dino_normal import (
     CgaDinoNormalNet,
     load_cga_dino_normal_checkpoint,
 )
+from pointact.model.vla_pointact.action_head_3d.polarapp_tasknet_encoder import (
+    PolarAppTaskAwareEncoder,
+    load_polarapp_tasknet_checkpoint,
+)
 from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision import (
     PolarDepthSelfSupervision,
     mask_points_at_depth_targets,
@@ -72,12 +76,17 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         vlm_backbone: Qwen2_5_VLForConditionalGeneration = None,
     ):
         super().__init__(config)
-        if getattr(config, "polar_enabled", False) and self.__class__.__name__ != (
-            "VLAEncDec3DWithActionRegressionModel"
+        polar_model_classes = {
+            "VLAEncDec3DWithActionClassificationModel",
+            "VLAEncDec3DWithActionRegressionModel",
+        }
+        if (
+            getattr(config, "polar_enabled", False)
+            and self.__class__.__name__ not in polar_model_classes
         ):
             raise ValueError(
-                "polar_enabled is implemented only for "
-                "VLAEncDec3DWithActionRegressionModel"
+                "polar_enabled is implemented only for PointACT with-action "
+                "classification/regression models"
             )
         self.vlm_backbone = vlm_backbone or Qwen2_5_VLForConditionalGeneration(self.config)
 
@@ -754,6 +763,11 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         super().__init__(config, vlm_backbone)
 
         hidden_size = self.config.text_config.hidden_size
+        polar_feature_channels = (
+            (self.config.polarapp_pyramid_channels,) * 5
+            if self.config.polar_backbone == "polarapp_taskaware"
+            else SfpWildFeatureEncoder.feature_channels
+        )
 
         self.ptv3_model = PointTransformerUnetWithAction(
             input_size=self.config.ptv3_input_channels, 
@@ -770,7 +784,51 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
             auxiliary_decoder=self.config.use_target_reconstruction,
+            polar_enabled=self.config.polar_enabled,
+            sfp_feature_channels=polar_feature_channels,
+            polar_neighbor_radius=self.config.polar_neighbor_radius,
+            polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
+            polar_max_views=self.config.polar_max_views,
+            polar_token_mode=self.config.polar_token_mode,
         )
+        if self.config.polar_enabled:
+            if self.config.polar_backbone == "sfp_wild":
+                self.sfp_encoder = SfpWildFeatureEncoder()
+                self.sfp_encoder.set_normal_decoder_trainable(False)
+            elif self.config.polar_backbone == "cga_transformer":
+                self.cga_encoder = CgaTransformerFeatureEncoder(
+                    residual_num=self.config.cga_residual_blocks,
+                    observation_channels=7,
+                    physical_prior_channels=11,
+                )
+            elif self.config.polar_backbone == "cga_dinov3_normal":
+                # Construct after ``post_init`` to preserve pretrained DINO weights.
+                pass
+            elif self.config.polar_backbone == "polarapp_taskaware":
+                self.polarapp_encoder = PolarAppTaskAwareEncoder(
+                    input_mode=self.config.polarapp_input_mode,
+                    pyramid_channels=self.config.polarapp_pyramid_channels,
+                )
+                self.polarapp_encoder.set_normal_head_trainable(False)
+            else:
+                raise ValueError(
+                    f"Unsupported polar_backbone={self.config.polar_backbone!r}"
+                )
+        if self.config.use_polar_depth_self_supervision:
+            self.polar_depth_self_supervision = PolarDepthSelfSupervision(
+                feature_channels=polar_feature_channels,
+                point_feature_channels=tuple(self.config.ptv3_enc_channels),
+                min_depth=self.config.polar_depth_min,
+                max_depth=self.config.polar_depth_max,
+                depth_keep_probability=self.config.polar_depth_keep_probability,
+                normal_weight=self.config.polar_consistency_weight,
+                sparse_depth_weight=self.config.sparse_depth_consistency_weight,
+                smoothness_weight=self.config.depth_smoothness_weight,
+            )
+            self.completion_action_projection = nn.Sequential(
+                nn.LayerNorm(32),
+                nn.Linear(32, self.ptv3_model.output_size),
+            )
         if self.config.use_target_reconstruction:
             if self.config.target_reconstruction_weight < 0 or self.config.target_mask_loss_weight < 0:
                 raise ValueError("Target reconstruction loss weights must be nonnegative")
@@ -836,10 +894,304 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             raise NotImplementedError(f"unsupported pos_center {self.config.action_head_pos_center}")
     
         self.post_init()
+        if self.config.polar_enabled and self.config.polar_backbone == "cga_dinov3_normal":
+            normal_kwargs = {
+                "observation_channels": 7,
+                "physical_prior_channels": 11,
+                "transformer_blocks": self.config.cga_residual_blocks,
+                "use_dino": self.config.cga_dino_use_dino,
+            }
+            if self.config.cga_dino_use_dino:
+                self.cga_dino_encoder = CgaDinoNormalNet.from_dinov3(
+                    self.config.dinov3_weights,
+                    **normal_kwargs,
+                )
+            else:
+                self.cga_dino_encoder = CgaDinoNormalNet(None, **normal_kwargs)
+        if self.config.use_polar_depth_self_supervision:
+            with torch.no_grad():
+                self.completion_action_projection[-1].weight.zero_()
+                self.completion_action_projection[-1].bias.zero_()
+        if self.config.polar_enabled:
+            for module in self.ptv3_model.modules():
+                copy_qkv = getattr(module, "copy_polar_qkv_", None)
+                if copy_qkv is not None:
+                    copy_qkv()
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "sfp_wild"
+            and self.config.sfp_checkpoint is not None
+        ):
+            load_report = load_sfp_wild_checkpoint(
+                self.sfp_encoder,
+                self.config.sfp_checkpoint,
+                require_decoder=self.config.use_polar_depth_self_supervision,
+            )
+            logger.info("Loaded SfP-Wild checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "cga_transformer"
+            and self.config.cga_checkpoint is not None
+        ):
+            load_report = load_cga_transformer_checkpoint(
+                self.cga_encoder, self.config.cga_checkpoint
+            )
+            logger.info("Loaded CGA-Transformer checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "cga_dinov3_normal"
+            and self.config.cga_dino_normal_checkpoint is not None
+        ):
+            load_report = load_cga_dino_normal_checkpoint(
+                self.cga_dino_encoder, self.config.cga_dino_normal_checkpoint
+            )
+            logger.info("Loaded CGA+DINO normal checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_checkpoint is not None
+        ):
+            load_report = load_polarapp_tasknet_checkpoint(
+                self.polarapp_encoder,
+                self.config.polarapp_checkpoint,
+                require_normal_head=self.config.use_polar_depth_self_supervision,
+            )
+            logger.info("Loaded PolarAPP TaskNet checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_freeze
+        ):
+            self.polarapp_encoder.set_tasknet_trainable(False)
+        elif (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+        ):
+            self.polarapp_encoder.set_normal_head_trainable(False)
+        elif self.config.polar_enabled and self._polar_encoder_frozen():
+            self._polar_encoder().requires_grad_(False)
+            self._polar_encoder().eval()
         nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
         self.to_float32_action_head()
 
+    def _polar_encoder(self):
+        if self.config.polar_backbone == "sfp_wild":
+            return self.sfp_encoder
+        if self.config.polar_backbone == "cga_transformer":
+            return self.cga_encoder
+        if self.config.polar_backbone == "polarapp_taskaware":
+            return self.polarapp_encoder
+        return self.cga_dino_encoder
+
+    def _polar_encoder_frozen(self):
+        if self.config.polar_backbone == "sfp_wild":
+            return self.config.sfp_freeze
+        if self.config.polar_backbone == "polarapp_taskaware":
+            # TaskNet's new five-level FPN remains trainable.
+            return False
+        return self.config.cga_freeze
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.config.polar_enabled and self._polar_encoder_frozen():
+            self._polar_encoder().eval()
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_freeze
+        ):
+            self.polarapp_encoder.set_tasknet_training(False)
+        if (
+            self.config.use_polar_depth_self_supervision
+            and self.config.polar_backbone == "sfp_wild"
+        ):
+            self.sfp_encoder.set_normal_decoder_training(False)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+        ):
+            self.polarapp_encoder.set_normal_head_training(False)
+        return self
+
+    def _build_polar_context(self, batch_size, **kwargs):
+        names = (
+            "polar_images", "polar_K", "T_camera_from_model", "view_valid",
+            "pixel_valid", "polar_pixel_transform", "polar_rgb",
+            "polar_physical_prior",
+        )
+        values = {name: kwargs.get(name) for name in names}
+        if not self.config.polar_enabled:
+            if any(value is not None for value in values.values()):
+                raise ValueError(
+                    "Polar routing tensors were provided while polar_enabled=False"
+                )
+            return None
+        required = ("polar_images", "polar_K", "T_camera_from_model", "view_valid")
+        missing = [name for name in required if values[name] is None]
+        if missing:
+            raise ValueError(f"Polar joint attention is enabled; missing inputs: {missing}")
+        images = values["polar_images"]
+        if images.ndim != 5 or images.shape[0] != batch_size or images.shape[2] != 7:
+            raise ValueError(
+                "polar_images must be [B,V,7,H,W] and match the action batch"
+            )
+        batch, views, _, height, width = images.shape
+        if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
+            prior = values["polar_physical_prior"]
+            if prior is None:
+                raise ValueError(
+                    f"polar_backbone={self.config.polar_backbone!r} requires "
+                    "polar_physical_prior [B,V,11,H,W]"
+                )
+            if prior.shape != (batch, views, 11, height, width):
+                raise ValueError("polar_physical_prior must be [B,V,11,H,W]")
+        if (
+            self.config.polar_backbone == "cga_dinov3_normal"
+            and self.config.cga_dino_use_dino
+        ):
+            rgb = values["polar_rgb"]
+            if rgb is None or rgb.shape != (batch, views, 3, height, width):
+                raise ValueError(
+                    "cga_dinov3_normal requires aligned polar_rgb [B,V,3,H,W]"
+                )
+        if values["polar_K"].shape != (batch, views, 3, 3):
+            raise ValueError("polar_K must be [B,V,3,3]")
+        if values["T_camera_from_model"].shape != (batch, views, 4, 4):
+            raise ValueError("T_camera_from_model must be [B,V,4,4]")
+        if values["view_valid"].shape != (batch, views):
+            raise ValueError("view_valid must be [B,V]")
+
+        encoder = self._polar_encoder()
+        encoder_dtype = next(encoder.parameters()).dtype
+        flat_images = images.reshape(batch * views, 7, height, width).to(encoder_dtype)
+        encoder_args = [flat_images]
+        if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
+            encoder_args.append(
+                values["polar_physical_prior"]
+                .reshape(batch * views, 11, height, width)
+                .to(encoder_dtype)
+            )
+        if self.config.polar_backbone == "cga_dinov3_normal":
+            flat_rgb = None
+            if self.config.cga_dino_use_dino:
+                flat_rgb = (
+                    values["polar_rgb"]
+                    .reshape(batch * views, 3, height, width)
+                    .to(encoder_dtype)
+                )
+            encoder_args.append(flat_rgb)
+
+        task_features = None
+        if self.config.polar_backbone == "polarapp_taskaware":
+            task_features = encoder.forward_task_features(flat_images)
+            flat_levels = encoder.build_pyramid(task_features)
+        elif self._polar_encoder_frozen():
+            with torch.no_grad():
+                flat_levels = encoder.forward_features(*encoder_args)
+        else:
+            flat_levels = encoder.forward_features(*encoder_args)
+        levels = tuple(
+            level.reshape(batch, views, *level.shape[1:]) for level in flat_levels
+        )
+        image_hw = torch.tensor(
+            [height, width], device=images.device, dtype=torch.long
+        ).expand(batch, views, 2)
+        context = {
+            "polar_feature_levels": levels,
+            "polar_K": values["polar_K"],
+            "T_camera_from_model": values["T_camera_from_model"],
+            "view_valid": values["view_valid"].bool(),
+            "polar_image_hw": image_hw,
+        }
+        if task_features is not None:
+            context["tasknet_features"] = task_features
+        if hasattr(encoder, "feature_strides") and hasattr(encoder, "feature_offsets"):
+            context["polar_feature_strides"] = tuple(encoder.feature_strides)
+            context["polar_feature_offsets"] = tuple(encoder.feature_offsets)
+        if values["pixel_valid"] is not None:
+            if values["pixel_valid"].shape != (batch, views, height, width):
+                raise ValueError("pixel_valid must be [B,V,H,W]")
+            context["pixel_valid"] = values["pixel_valid"].bool()
+        if values["polar_pixel_transform"] is not None:
+            context["polar_pixel_transform"] = values["polar_pixel_transform"]
+        return context
+
+    def _decode_polar_completion(
+        self,
+        stage_points,
+        polar_context,
+        polar_images,
+        observed_depth=None,
+        observed_depth_valid=None,
+        compute_loss=False,
+        depth_supervision_mask=None,
+    ):
+        normal_targets = None
+        if compute_loss:
+            batch, views = polar_context["polar_K"].shape[:2]
+            if self.config.polar_backbone == "sfp_wild":
+                detached_levels = tuple(
+                    level.detach().reshape(batch * views, *level.shape[2:])
+                    for level in polar_context["polar_feature_levels"]
+                )
+                with torch.no_grad():
+                    normal_targets = self.sfp_encoder.decode_normals(
+                        detached_levels, normalize=True
+                    )
+            elif self.config.polar_backbone == "polarapp_taskaware":
+                task_features = polar_context.get("tasknet_features")
+                if task_features is None:
+                    raise RuntimeError("TaskNet features are missing from polar context")
+                with torch.no_grad():
+                    normal_targets = self.polarapp_encoder.decode_normals(
+                        tuple(feature.detach() for feature in task_features),
+                        normalize=True,
+                        output_frame="sfp_wild",
+                    )
+            else:
+                raise RuntimeError(
+                    "The selected polar backbone does not provide normal targets"
+                )
+            normal_targets = normal_targets.reshape(
+                batch, views, *normal_targets.shape[1:]
+            )
+        point_levels, point_valid_levels = rasterize_fused_point_features(
+            stage_points=stage_points,
+            feature_levels=polar_context["polar_feature_levels"],
+            intrinsics=polar_context["polar_K"],
+            transforms=polar_context["T_camera_from_model"],
+            image_hw=polar_context["polar_image_hw"],
+            view_valid=polar_context["view_valid"],
+            pixel_valid=polar_context.get("pixel_valid"),
+            pixel_transform=polar_context.get("polar_pixel_transform"),
+            feature_strides=polar_context.get("polar_feature_strides"),
+            feature_offsets=polar_context.get("polar_feature_offsets"),
+        )
+        return self.polar_depth_self_supervision(
+            feature_levels=polar_context["polar_feature_levels"],
+            point_feature_levels=point_levels,
+            point_valid_levels=point_valid_levels,
+            polar_images=polar_images,
+            intrinsics=polar_context["polar_K"],
+            observed_depth=observed_depth,
+            observed_depth_valid=observed_depth_valid,
+            pixel_valid=polar_context.get("pixel_valid"),
+            view_valid=polar_context.get("view_valid"),
+            compute_loss=compute_loss,
+            depth_supervision_mask=depth_supervision_mask,
+            normal_targets=normal_targets,
+        )
+
     def to_float32_action_head(self):
+        if self.config.polar_enabled:
+            self._polar_encoder().to(dtype=torch.float32)
+        if self.config.use_polar_depth_self_supervision:
+            self.polar_depth_self_supervision = self.polar_depth_self_supervision.to(
+                dtype=torch.float32
+            )
+            self.completion_action_projection = self.completion_action_projection.to(
+                dtype=torch.float32
+            )
         if self.config.use_polar_material_conditioning:
             self.polar_material_conditioner = self.polar_material_conditioner.to(dtype=torch.float32)
         self.ctx_proj = self.ctx_proj.to(dtype=torch.float32)
@@ -868,6 +1220,8 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         outs = self.compute_action(
             points, npoints_in_batch, ctx_embeds, ctx_lens, states,
             return_intermediate_value=True,
+            _return_polar_auxiliary=self.config.use_polar_depth_self_supervision,
+            _compute_depth_loss=self.config.use_polar_depth_self_supervision,
             **kwargs,
         )
 
@@ -886,6 +1240,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         else:
             raise NotImplementedError(f"unsupported {self.config.action_head_pos_center}")
 
+        reconstruction_loss = None
         if self.config.use_target_reconstruction and self.training:
             if target_points is None or target_counts is None or target_input_mask is None:
                 raise ValueError("Target reconstruction training requires visible target labels")
@@ -895,6 +1250,16 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 target_points, target_counts, target_input_mask,
             )
             reconstruction_loss = geometry_loss + self.config.target_mask_loss_weight * mask_loss
+
+        polar_auxiliary = outs.get("polar_depth_auxiliary")
+        if polar_auxiliary is not None:
+            return (
+                action_loss,
+                (pos_loss, rot_loss, open_loss),
+                reconstruction_loss,
+                polar_auxiliary,
+            )
+        if reconstruction_loss is not None:
             return action_loss, (pos_loss, rot_loss, open_loss), reconstruction_loss
 
         return action_loss, (pos_loss, rot_loss, open_loss)
@@ -924,15 +1289,85 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             state_embs = self.state_encoder(states.unsqueeze(1), embodiment_id)
             action_features = torch.cat([state_embs, action_features], dim=1)
 
+        polar_context = kwargs.pop("_polar_context", None)
+        if polar_context is None:
+            polar_context = self._build_polar_context(batch_size, **kwargs)
+        return_polar_auxiliary = kwargs.pop("_return_polar_auxiliary", False)
+        compute_auxiliary_loss = kwargs.pop("_compute_depth_loss", False)
+        point_condition = self._material_point_condition(npoints_in_batch, **kwargs)
+        depth_supervision_mask = None
+        if (
+            self.config.use_polar_depth_self_supervision
+            and compute_auxiliary_loss
+            and self.training
+        ):
+            observed_valid = kwargs.get("observed_depth_valid")
+            if observed_valid is None:
+                raise ValueError("observed_depth_valid is required for masked completion")
+            random_keep = torch.rand_like(observed_valid.float()) < (
+                self.config.polar_depth_keep_probability
+            )
+            depth_supervision_mask = observed_valid.bool() & ~random_keep
+            points, npoints_in_batch, point_keep = mask_points_at_depth_targets(
+                points=points,
+                npoints_in_batch=npoints_in_batch,
+                target_mask=depth_supervision_mask,
+                intrinsics=polar_context["polar_K"],
+                transforms=polar_context["T_camera_from_model"],
+                view_valid=polar_context["view_valid"],
+                pixel_transform=polar_context.get("polar_pixel_transform"),
+            )
+            if point_condition is not None:
+                point_condition = point_condition[point_keep]
+
+        return_encoder_point = (
+            self.config.use_target_reconstruction
+            and self.training
+            and return_intermediate_value
+        )
         encoder_output = self.ptv3_model(
-            points, npoints_in_batch, ctx_embeds, ctx_lens,
+            points,
+            npoints_in_batch,
+            ctx_embeds,
+            ctx_lens,
             action_features,
-            point_condition=self._material_point_condition(npoints_in_batch, **kwargs),
-            return_encoder_point=(
-                self.config.use_target_reconstruction and self.training and return_intermediate_value
-            ),
+            point_condition=point_condition,
+            polar_context=polar_context,
+            return_encoder_point=return_encoder_point,
+            return_stage_points=self.config.use_polar_depth_self_supervision,
         )
         point_fts, point_coords, point_offsets, action_out_embeds = encoder_output[:4]
+        output_index = 4
+        encoder_point = None
+        if return_encoder_point:
+            encoder_point = encoder_output[output_index]
+            output_index += 1
+
+        polar_depth_auxiliary = None
+        if self.config.use_polar_depth_self_supervision:
+            stage_points = encoder_output[output_index]
+            observed_depth = kwargs.get("observed_depth")
+            observed_depth_valid = kwargs.get("observed_depth_valid")
+            if compute_auxiliary_loss and (
+                observed_depth is None or observed_depth_valid is None
+            ):
+                raise ValueError(
+                    "Polar/depth self-supervision is enabled during training; "
+                    "observed_depth and observed_depth_valid are required"
+                )
+            polar_depth_auxiliary = self._decode_polar_completion(
+                stage_points=stage_points,
+                polar_context=polar_context,
+                polar_images=kwargs["polar_images"],
+                observed_depth=observed_depth,
+                observed_depth_valid=observed_depth_valid,
+                compute_loss=compute_auxiliary_loss,
+                depth_supervision_mask=depth_supervision_mask,
+            )
+            completion = self.completion_action_projection(
+                polar_depth_auxiliary["completion_token"].to(action_out_embeds.dtype)
+            )
+            action_out_embeds = action_out_embeds + completion[:, None, :]
         out_npoints_in_batch = torch.diff(
             point_offsets, prepend=torch.tensor([0], device=device, dtype=torch.long)
         )
@@ -959,8 +1394,10 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 "point_coords": point_coords,
                 "npoints_in_batch": out_npoints_in_batch,
             }
-            if len(encoder_output) == 5:
-                outs["encoder_point"] = encoder_output[4]
+            if encoder_point is not None:
+                outs["encoder_point"] = encoder_point
+            if return_polar_auxiliary:
+                outs["polar_depth_auxiliary"] = polar_depth_auxiliary
             return outs
 
         return pred_actions
@@ -976,7 +1413,11 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
 
         hidden_size = self.config.text_config.hidden_size
         max_action_dim = self.config.max_action_dim
-        polar_feature_channels = SfpWildFeatureEncoder.feature_channels
+        polar_feature_channels = (
+            (self.config.polarapp_pyramid_channels,) * 5
+            if self.config.polar_backbone == "polarapp_taskaware"
+            else SfpWildFeatureEncoder.feature_channels
+        )
 
         self.ptv3_model = PointTransformerUnetWithAction(
             input_size=self.config.ptv3_input_channels, 
@@ -1025,6 +1466,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 # Construct after ``post_init`` so Hugging Face initialization
                 # cannot overwrite the already loaded DINOv3 weights.
                 pass
+            elif self.config.polar_backbone == "polarapp_taskaware":
+                self.polarapp_encoder = PolarAppTaskAwareEncoder(
+                    input_mode=self.config.polarapp_input_mode,
+                    pyramid_channels=self.config.polarapp_pyramid_channels,
+                )
+                # TaskNet normals are fixed pseudo-targets for the depth-normal
+                # consistency loss.  The feature body can still be fine-tuned.
+                self.polarapp_encoder.set_normal_head_trainable(False)
             else:
                 raise ValueError(f"Unsupported polar_backbone={self.config.polar_backbone!r}")
         if self.config.use_polar_depth_self_supervision:
@@ -1141,7 +1590,33 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 self.cga_dino_encoder, self.config.cga_dino_normal_checkpoint
             )
             logger.info("Loaded CGA+DINO normal checkpoint: %s", load_report)
-        if self.config.polar_enabled and self._polar_encoder_frozen():
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_checkpoint is not None
+        ):
+            load_report = load_polarapp_tasknet_checkpoint(
+                self.polarapp_encoder,
+                self.config.polarapp_checkpoint,
+                require_normal_head=self.config.use_polar_depth_self_supervision,
+            )
+            logger.info("Loaded PolarAPP TaskNet checkpoint: %s", load_report)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_freeze
+        ):
+            # Freeze only the released TaskNet.  The new 3 -> 5 FPN bridge must
+            # remain trainable even during the recommended frozen warm-up.
+            self.polarapp_encoder.set_tasknet_trainable(False)
+        elif (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+        ):
+            # Even when TaskNet features are fine-tuned, its released normal
+            # head remains a detached teacher rather than a moving loss target.
+            self.polarapp_encoder.set_normal_head_trainable(False)
+        elif self.config.polar_enabled and self._polar_encoder_frozen():
             self._polar_encoder().requires_grad_(False)
             self._polar_encoder().eval()
         nn.init.normal_(self.position_embedding.weight, mean=0.0, std=0.02)
@@ -1152,11 +1627,17 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             return self.sfp_encoder
         if self.config.polar_backbone == "cga_transformer":
             return self.cga_encoder
+        if self.config.polar_backbone == "polarapp_taskaware":
+            return self.polarapp_encoder
         return self.cga_dino_encoder
 
     def _polar_encoder_frozen(self):
         if self.config.polar_backbone == "sfp_wild":
             return self.config.sfp_freeze
+        if self.config.polar_backbone == "polarapp_taskaware":
+            # The PointACT FPN remains trainable; TaskNet freezing is handled
+            # separately by ``set_tasknet_trainable``.
+            return False
         return self.config.cga_freeze
 
     def to_float32_action_head(self):
@@ -1183,10 +1664,21 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         if self.config.polar_enabled and self._polar_encoder_frozen():
             self._polar_encoder().eval()
         if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+            and self.config.polarapp_freeze
+        ):
+            self.polarapp_encoder.set_tasknet_training(False)
+        if (
             self.config.use_polar_depth_self_supervision
             and self.config.polar_backbone == "sfp_wild"
         ):
             self.sfp_encoder.set_normal_decoder_training(False)
+        if (
+            self.config.polar_enabled
+            and self.config.polar_backbone == "polarapp_taskaware"
+        ):
+            self.polarapp_encoder.set_normal_head_training(False)
         return self
 
     def _build_polar_context(self, batch_size, **kwargs):
@@ -1239,7 +1731,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             if self.config.cga_dino_use_dino:
                 flat_rgb = values["polar_rgb"].reshape(batch * views, 3, height, width).to(encoder_dtype)
             encoder_args.append(flat_rgb)
-        if self._polar_encoder_frozen():
+        task_features = None
+        if self.config.polar_backbone == "polarapp_taskaware":
+            # Run the released three-level TaskNet only once.  Its TaF1/2/3
+            # tensors feed both the five-level PointACT bridge and, detached,
+            # the released normal head used by the depth consistency loss.
+            task_features = encoder.forward_task_features(flat_images)
+            flat_levels = encoder.build_pyramid(task_features)
+        elif self._polar_encoder_frozen():
             with torch.no_grad():
                 flat_levels = encoder.forward_features(*encoder_args)
         else:
@@ -1257,6 +1756,11 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             "view_valid": values["view_valid"].bool(),
             "polar_image_hw": image_hw,
         }
+        if task_features is not None:
+            context["tasknet_features"] = task_features
+        if hasattr(encoder, "feature_strides") and hasattr(encoder, "feature_offsets"):
+            context["polar_feature_strides"] = tuple(encoder.feature_strides)
+            context["polar_feature_offsets"] = tuple(encoder.feature_offsets)
         if values["pixel_valid"] is not None:
             if values["pixel_valid"].shape != (batch, views, height, width):
                 raise ValueError("pixel_valid must be [B,V,H,W]")
@@ -1275,18 +1779,35 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         compute_loss=False,
         depth_supervision_mask=None,
     ):
-        sfp_normals = None
+        normal_targets = None
         if compute_loss:
             batch, views = polar_context["polar_K"].shape[:2]
-            detached_levels = tuple(
-                level.detach().reshape(batch * views, *level.shape[2:])
-                for level in polar_context["polar_feature_levels"]
-            )
-            with torch.no_grad():
-                sfp_normals = self.sfp_encoder.decode_normals(
-                    detached_levels, normalize=True
+            if self.config.polar_backbone == "sfp_wild":
+                detached_levels = tuple(
+                    level.detach().reshape(batch * views, *level.shape[2:])
+                    for level in polar_context["polar_feature_levels"]
                 )
-            sfp_normals = sfp_normals.reshape(batch, views, *sfp_normals.shape[1:])
+                with torch.no_grad():
+                    normal_targets = self.sfp_encoder.decode_normals(
+                        detached_levels, normalize=True
+                    )
+            elif self.config.polar_backbone == "polarapp_taskaware":
+                task_features = polar_context.get("tasknet_features")
+                if task_features is None:
+                    raise RuntimeError("TaskNet features are missing from polar context")
+                with torch.no_grad():
+                    normal_targets = self.polarapp_encoder.decode_normals(
+                        tuple(feature.detach() for feature in task_features),
+                        normalize=True,
+                        output_frame="sfp_wild",
+                    )
+            else:
+                raise RuntimeError(
+                    "The selected polar backbone does not provide normal targets"
+                )
+            normal_targets = normal_targets.reshape(
+                batch, views, *normal_targets.shape[1:]
+            )
         point_levels, point_valid_levels = rasterize_fused_point_features(
             stage_points=stage_points,
             feature_levels=polar_context["polar_feature_levels"],
@@ -1296,6 +1817,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             view_valid=polar_context["view_valid"],
             pixel_valid=polar_context.get("pixel_valid"),
             pixel_transform=polar_context.get("polar_pixel_transform"),
+            feature_strides=polar_context.get("polar_feature_strides"),
+            feature_offsets=polar_context.get("polar_feature_offsets"),
         )
         return self.polar_depth_self_supervision(
             feature_levels=polar_context["polar_feature_levels"],
@@ -1309,7 +1832,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             view_valid=polar_context.get("view_valid"),
             compute_loss=compute_loss,
             depth_supervision_mask=depth_supervision_mask,
-            sfp_normals=sfp_normals,
+            normal_targets=normal_targets,
         )
 
     def compute_action_loss(

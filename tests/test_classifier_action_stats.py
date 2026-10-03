@@ -88,13 +88,17 @@ class ClassifierActionStatsTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FileExistsError", result.stderr)
 
-    def test_rejects_incomplete_point_cloud_config(self):
+    def test_accepts_v2_incomplete9_point_cloud_config(self):
         config = yaml.safe_load(self.config_path.read_text())
         config["lerobot_datasets"][0]["point_cloud_dirname"] = "points_frontview_polar_incomplete9"
         self.config_path.write_text(yaml.safe_dump(config))
         result = self.run_prepare()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("expected filled9", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_config = yaml.safe_load(Path(result.stdout.strip()).read_text())
+        self.assertEqual(
+            output_config["lerobot_datasets"][0]["point_cloud_dirname"],
+            "points_frontview_polar_incomplete9",
+        )
 
     def test_accepts_xyz_polar_features_from_filled9(self):
         config = yaml.safe_load(self.config_path.read_text())

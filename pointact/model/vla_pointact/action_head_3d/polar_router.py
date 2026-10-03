@@ -52,6 +52,30 @@ def sfp_feature_geometry(level: int) -> tuple[int, float]:
     return stride, (stride - 1) / 2.0
 
 
+def routed_feature_geometry(point, level: int) -> tuple[float, float]:
+    """Return encoder-provided geometry or the legacy SfP-Wild geometry.
+
+    PolarAPP uses 3x3/stride-2/padding-1 convolutions, whose feature centers
+    have zero input-pixel offset.  SfP-Wild uses 2x2 max pooling and therefore
+    keeps the historical half-pixel offsets.  Supplying metadata avoids
+    changing any existing backbone's routing behavior.
+    """
+
+    strides = point.get("polar_feature_strides")
+    offsets = point.get("polar_feature_offsets")
+    if strides is None and offsets is None:
+        return sfp_feature_geometry(level)
+    if strides is None or offsets is None or len(strides) != 5 or len(offsets) != 5:
+        raise ValueError(
+            "polar_feature_strides and polar_feature_offsets must both contain five values"
+        )
+    stride = float(torch.as_tensor(strides[level]).item())
+    offset = float(torch.as_tensor(offsets[level]).item())
+    if not torch.isfinite(torch.tensor((stride, offset))).all() or stride <= 0:
+        raise ValueError("Polar feature geometry must contain finite positive strides")
+    return stride, offset
+
+
 def _farthest_2d(points: Tensor, count: int) -> Tensor:
     """Deterministic farthest-point coverage, initialized at the top-left key."""
     if count >= len(points):
@@ -137,7 +161,7 @@ class PolarTokenRouter:
         """Return every valid feature cell, shared by every group in a sample."""
         features = point.polar_features
         _, num_views, feat_h, feat_w, _ = features.shape
-        stride, center_offset = sfp_feature_geometry(self.level)
+        stride, center_offset = routed_feature_geometry(point, self.level)
         keys = []
         for view in range(num_views):
             if not bool(point.view_valid[sample, view]):
@@ -198,7 +222,7 @@ class PolarTokenRouter:
             if pixel_affine.shape != (batch_size, num_views, 3, 3):
                 raise ValueError("polar_pixel_transform must be [B,V,3,3]")
             pixel_affine = pixel_affine.float()
-        stride, center_offset = sfp_feature_geometry(self.level)
+        stride, center_offset = routed_feature_geometry(point, self.level)
         groups = torch.split(order, group_lengths.detach().cpu().tolist())
         routes = []
         total_unique_points = 0

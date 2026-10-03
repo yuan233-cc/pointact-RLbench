@@ -54,6 +54,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         cga_dino_normal_checkpoint=None,
         dinov3_weights=None,
         cga_dino_use_dino=True,
+        polarapp_checkpoint=None,
+        polarapp_freeze=True,
+        polarapp_allow_random_init=False,
+        polarapp_pyramid_channels=128,
+        polarapp_input_mode="sfp_proxy",
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
@@ -125,6 +130,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.cga_dino_normal_checkpoint = cga_dino_normal_checkpoint
         self.dinov3_weights = dinov3_weights
         self.cga_dino_use_dino = cga_dino_use_dino
+        self.polarapp_checkpoint = polarapp_checkpoint
+        self.polarapp_freeze = polarapp_freeze
+        self.polarapp_allow_random_init = polarapp_allow_random_init
+        self.polarapp_pyramid_channels = polarapp_pyramid_channels
+        self.polarapp_input_mode = polarapp_input_mode
         self.polar_neighbor_radius = polar_neighbor_radius
         self.polar_max_tokens_per_group = polar_max_tokens_per_group
         self.polar_max_views = polar_max_views
@@ -143,10 +153,13 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 raise ValueError(
                     "Polar joint attention supports concerto or utonia encoder-only PointACT"
                 )
-            if polar_backbone not in ("sfp_wild", "cga_transformer", "cga_dinov3_normal"):
+            if polar_backbone not in (
+                "sfp_wild", "cga_transformer", "cga_dinov3_normal",
+                "polarapp_taskaware",
+            ):
                 raise ValueError(
                     "polar_backbone must be 'sfp_wild', 'cga_transformer', or "
-                    "'cga_dinov3_normal'"
+                    "'cga_dinov3_normal', or 'polarapp_taskaware'"
                 )
             if list(sfp_feature_levels) != ["x1", "x2", "x3", "x4", "x5"]:
                 raise ValueError("The supported stage mapping is exactly x1..x5")
@@ -166,14 +179,45 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                     "cga_dinov3_normal requires cga_dino_normal_checkpoint; use "
                     "cga_allow_random_init=True only for explicit from-scratch tests"
                 )
+        if polar_enabled and polar_backbone == "polarapp_taskaware":
+            if polarapp_checkpoint is None and not polarapp_allow_random_init:
+                raise ValueError(
+                    "polarapp_taskaware requires polarapp_checkpoint; use "
+                    "polarapp_allow_random_init=True only for explicit from-scratch tests"
+                )
+            if polarapp_input_mode not in ("sfp_proxy", "tasknet7"):
+                raise ValueError(
+                    "polarapp_input_mode must be 'sfp_proxy' or 'tasknet7'"
+                )
+            if polarapp_pyramid_channels <= 0:
+                raise ValueError("polarapp_pyramid_channels must be positive")
         if use_polar_depth_self_supervision and not polar_enabled:
             raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
-        if use_polar_depth_self_supervision and polar_backbone != "sfp_wild":
-            raise ValueError("Normal/depth self-supervision requires polar_backbone='sfp_wild'")
+        if use_polar_depth_self_supervision and polar_backbone not in (
+            "sfp_wild", "polarapp_taskaware"
+        ):
+            raise ValueError(
+                "Normal/depth self-supervision requires polar_backbone='sfp_wild' "
+                "or 'polarapp_taskaware'"
+            )
+        if (
+            use_polar_depth_self_supervision
+            and polar_backbone == "polarapp_taskaware"
+            and polarapp_checkpoint is None
+        ):
+            raise ValueError(
+                "TaskNet normal/depth self-supervision requires a pretrained "
+                "polarapp_checkpoint; a random normal teacher is not valid"
+            )
         if not 0 < polar_depth_min < polar_depth_max:
             raise ValueError("Expected 0 < polar_depth_min < polar_depth_max")
         if not 0 < polar_depth_keep_probability < 1:
             raise ValueError("polar_depth_keep_probability must be in (0,1)")
+        if use_polar_depth_self_supervision and use_target_reconstruction:
+            raise ValueError(
+                "Polar/depth self-supervision and target reconstruction cannot be "
+                "enabled together because both alter the supervised point set"
+            )
         self.use_polar_material_conditioning = use_polar_material_conditioning
         self.use_target_reconstruction = use_target_reconstruction
         self.target_reconstruction_weight = target_reconstruction_weight

@@ -52,11 +52,17 @@ def prepare(input_config: Path, output_dir: Path, dataset_root: Path | None = No
     for index, dataset in enumerate(config["lerobot_datasets"]):
         if not isinstance(dataset, dict):
             raise ValueError(f"Dataset {index}: expected a mapping")
-        if dataset.get("point_cloud_dirname") != "points_frontview_polar_filled9":
-            raise ValueError(f"Dataset {index}: expected filled9 point-cloud archive")
+        supported_point_archives = {
+            "points_frontview_polar_filled9",
+            "points_frontview_polar_incomplete9",
+        }
+        if dataset.get("point_cloud_dirname") not in supported_point_archives:
+            raise ValueError(
+                f"Dataset {index}: expected one of {sorted(supported_point_archives)}"
+            )
         if dataset.get("point_feature_mode") not in ("xyzrgb", "xyzrgb_polar", "xyz_polar"):
             raise ValueError(
-                f"Dataset {index}: expected xyzrgb, xyzrgb_polar or xyz_polar features from filled9"
+                f"Dataset {index}: expected xyzrgb, xyzrgb_polar or xyz_polar point features"
             )
         if dataset.get("converted_rot_type") != "euler" or dataset.get("is_delta_action") is not False:
             raise ValueError(f"Dataset {index}: classifier requires absolute Euler actions")

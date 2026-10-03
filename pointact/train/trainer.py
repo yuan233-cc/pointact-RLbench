@@ -44,6 +44,13 @@ class VLATrainer(Trainer):
         ("vision_lr", "visual", lambda name: "visual" in name and "merger" not in name),
         ("merger_lr", "merger", lambda name: "visual" in name and "merger" in name),
         ("llm_lr", "language_model", lambda name: "language_model" in name),
+        (
+            "polarapp_lr",
+            "PolarAPP TaskNet",
+            lambda name: (
+                "polarapp_encoder." in name and ".pyramid_" not in name
+            ),
+        ),
     )
 
     def __init__(self, *args, **kwargs):

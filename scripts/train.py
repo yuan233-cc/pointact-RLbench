@@ -66,10 +66,17 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
     if (training_args.use_target_reconstruction and
             recipe.model_class.rsplit(".", 1)[-1] != "VLAEncDec3DWithActionClassificationModel"):
         raise ValueError("Target reconstruction supports the PointACT with-action classifier")
-    if (training_args.use_polar_depth_self_supervision and
-            recipe.model_class.rsplit(".", 1)[-1] != "VLAEncDec3DWithActionRegressionModel"):
+    depth_model_classes = {
+        "VLAEncDec3DWithActionClassificationModel",
+        "VLAEncDec3DWithActionRegressionModel",
+    }
+    if (
+        training_args.use_polar_depth_self_supervision
+        and recipe.model_class.rsplit(".", 1)[-1] not in depth_model_classes
+    ):
         raise ValueError(
-            "Polar/depth self-supervision supports the PointACT with-action regressor"
+            "Polar/depth self-supervision supports PointACT with-action "
+            "classification/regression models"
         )
     if training_args.model_name_or_path is None:
         return build_fresh_model(recipe, training_args, compute_dtype)
@@ -96,6 +103,11 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
                 cga_dino_normal_checkpoint=training_args.cga_dino_normal_checkpoint,
                 dinov3_weights=training_args.dinov3_weights,
                 cga_dino_use_dino=training_args.cga_dino_use_dino,
+                polarapp_checkpoint=training_args.polarapp_checkpoint,
+                polarapp_freeze=training_args.polarapp_freeze,
+                polarapp_allow_random_init=training_args.polarapp_allow_random_init,
+                polarapp_pyramid_channels=training_args.polarapp_pyramid_channels,
+                polarapp_input_mode=training_args.polarapp_input_mode,
                 polar_neighbor_radius=training_args.polar_neighbor_radius,
                 polar_max_tokens_per_group=training_args.polar_max_tokens_per_group,
                 polar_max_views=training_args.polar_max_views,

@@ -1,7 +1,7 @@
 """Single-view normal/depth self-supervision for dense metric depth.
 
 Predicted metric depth is differentiated into camera-frame normals and matched
-directly to the normals decoded by the pretrained SfP-Wild model.  Sparse depth
+to detached normals from the selected pretrained polar backbone.  Sparse depth
 and edge-aware smoothness retain metric scale and regularize unobserved pixels.
 """
 
@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from .polar_router import sfp_feature_geometry
+from .polar_router import routed_feature_geometry
 
 
 class _ConvBlock(nn.Module):
@@ -42,12 +42,16 @@ def rasterize_fused_point_features(
     view_valid: Tensor,
     pixel_valid: Tensor | None = None,
     pixel_transform: Tensor | None = None,
+    feature_strides: tuple[float, ...] | None = None,
+    feature_offsets: tuple[float, ...] | None = None,
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
-    """Project each PointACT encoder stage onto its matching SfP feature grid.
+    """Project each PointACT encoder stage onto its matching polar feature grid.
 
     Colliding point features are averaged. Projection indices are discrete, but
     the scatter operation remains differentiable with respect to point features,
-    which is the gradient path used by the reconstruction loss.
+    which is the gradient path used by the reconstruction loss. Encoder-provided
+    stride/offset metadata is used when present; otherwise the legacy SfP-Wild
+    max-pooling geometry is retained.
     """
     if len(stage_points) != len(feature_levels):
         raise ValueError("stage_points and feature_levels must have the same length")
@@ -63,6 +67,11 @@ def rasterize_fused_point_features(
     if pixel_transform is not None and pixel_transform.shape != (batch, views, 3, 3):
         raise ValueError("pixel_transform must be [B,V,3,3]")
 
+    geometry = {
+        "polar_feature_strides": feature_strides,
+        "polar_feature_offsets": feature_offsets,
+    }
+
     maps, masks = [], []
     for level_index, (stage, polar_level) in enumerate(zip(stage_points, feature_levels)):
         point_feat = stage["feat"]
@@ -71,7 +80,7 @@ def rasterize_fused_point_features(
         if polar_level.shape[:2] != (batch, views):
             raise ValueError("Every feature level must be [B,V,C,H,W]")
         feat_h, feat_w = polar_level.shape[-2:]
-        stride, center_offset = sfp_feature_geometry(level_index)
+        stride, center_offset = routed_feature_geometry(geometry, level_index)
         view_maps, view_masks = [], []
         for sample in range(batch):
             sample_points = point_batch == sample
@@ -133,7 +142,14 @@ def mask_points_at_depth_targets(
     view_valid: Tensor,
     pixel_transform: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Remove input points whose projections are reserved as depth targets."""
+    """Remove input points whose projections are reserved as depth targets.
+
+    RLBench V2 serializes ``point_pixel_indices`` with ``floor(uv)``.  Use the
+    same raster-cell convention here so a held-out sparse-depth pixel cannot
+    retain its source point merely because nearest-integer rounding selects a
+    neighboring pixel.  The small epsilon matches the dataset round-trip audit
+    and only absorbs floating-point drift at exact integer coordinates.
+    """
     batch, views = target_mask.shape[:2]
     if target_mask.ndim != 5 or target_mask.shape[2] != 1:
         raise ValueError("target_mask must be [B,V,1,H,W]")
@@ -171,8 +187,9 @@ def mask_points_at_depth_targets(
                 transformed = uv_h @ pixel_transform[sample, view].float().transpose(0, 1)
                 uv = transformed[:, :2] / transformed[:, 2:].clamp_min(1e-6)
             height, width = target_mask.shape[-2:]
-            cols = uv[:, 0].round().long()
-            rows = uv[:, 1].round().long()
+            pixel_indices = torch.floor(uv + 1e-4).long()
+            cols = pixel_indices[:, 0]
+            rows = pixel_indices[:, 1]
             valid &= (cols >= 0) & (cols < width) & (rows >= 0) & (rows < height)
             safe_cols = cols.clamp(0, width - 1)
             safe_rows = rows.clamp(0, height - 1)
@@ -355,6 +372,7 @@ class PolarDepthSelfSupervision(nn.Module):
         view_valid: Tensor | None = None,
         compute_loss: bool = True,
         depth_supervision_mask: Tensor | None = None,
+        normal_targets: Tensor | None = None,
         sfp_normals: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if polar_images.ndim != 5 or polar_images.shape[2] != 7:
@@ -369,8 +387,14 @@ class PolarDepthSelfSupervision(nn.Module):
             if observed_depth_valid is None or observed_depth_valid.shape != expected_depth_shape:
                 raise ValueError("observed_depth_valid must match observed_depth")
             expected_normal_shape = (batch, views, 3, height, width)
-            if sfp_normals is None or sfp_normals.shape != expected_normal_shape:
-                raise ValueError(f"sfp_normals must have shape {expected_normal_shape}")
+            if normal_targets is not None and sfp_normals is not None:
+                raise ValueError("Provide normal_targets or sfp_normals, not both")
+            if normal_targets is None:
+                normal_targets = sfp_normals
+            if normal_targets is None or normal_targets.shape != expected_normal_shape:
+                raise ValueError(
+                    f"normal_targets must have shape {expected_normal_shape}"
+                )
 
         flat_levels = tuple(level.reshape(batch * views, *level.shape[2:]) for level in feature_levels)
         flat_point_levels = tuple(
@@ -442,7 +466,7 @@ class PolarDepthSelfSupervision(nn.Module):
         flat_k = intrinsics.reshape(batch * views, 3, 3).to(prediction.dtype)
         normals, normal_valid = depth_to_normals(prediction, flat_k)
         polar = polar_images.reshape(batch * views, 7, height, width).to(prediction.dtype)
-        target_normals = sfp_normals.detach().reshape(
+        target_normals = normal_targets.detach().reshape(
             batch * views, 3, height, width
         ).to(prediction.dtype)
         target_magnitude = torch.linalg.vector_norm(
@@ -455,8 +479,8 @@ class PolarDepthSelfSupervision(nn.Module):
         )
         target_normals = F.normalize(target_normals, dim=1, eps=1e-6)
 
-        # SfP-Wild uses +left,+down,+forward while the calibrated pinhole
-        # geometry uses +right,+down,+forward. Compare in SfP-Wild coordinates.
+        # Polar pseudo-targets use the shared +left,+down,+forward comparison
+        # frame while calibrated pinhole geometry uses +right,+down,+forward.
         predicted_sfp_normals = torch.cat(
             (-normals[:, 0:1], normals[:, 1:]), dim=1
         )
@@ -499,6 +523,8 @@ class PolarDepthSelfSupervision(nn.Module):
             "sparse_depth_loss": sparse_depth_loss,
             "smoothness_loss": smoothness_loss,
             "predicted_normals": normals.reshape(batch, views, 3, height, width),
+            "normal_targets": target_normals.reshape(batch, views, 3, height, width),
+            # Backward-compatible alias retained for existing logs/checkpoints.
             "sfp_normals": target_normals.reshape(batch, views, 3, height, width),
         })
         return output

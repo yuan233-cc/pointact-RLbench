@@ -32,6 +32,8 @@ class GridPoolingWithAction(GridPooling):
         "pixel_valid",
         "polar_image_hw",
         "polar_pixel_transform",
+        "polar_feature_strides",
+        "polar_feature_offsets",
         "polar_route_stats",
     )
 
