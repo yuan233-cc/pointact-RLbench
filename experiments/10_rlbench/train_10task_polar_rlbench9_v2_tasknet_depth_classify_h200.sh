@@ -72,9 +72,11 @@ else
     data_path="$(python experiments/10_rlbench/prepare_classifier_data_config.py "${prepare_args[@]}")"
 fi
 
-# 256x256 TaskNet/depth tensors dominate memory. Batch 32, a 192-channel FPN,
-# and 64 local polar tokens are a high-throughput starting point for 140 GiB.
-# If the first optimizer step OOMs, lower PER_DEVICE_BATCH_SIZE to 24, then 16.
+# The released TaskNet decoder has a 510-channel full-resolution FFN tensor.
+# At 256x256, batch 64 is the largest batch that fits PyTorch's 32-bit conv
+# indexing limit (64*510*256*256 < 2^31; batch 65 exceeds it). Batch 64 was
+# verified through three optimizer steps on one H200.  Relative to batch 32,
+# halve max/save steps to keep sample exposure and checkpoint cadence stable.
 accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --model_class VLAEncDec3DWithActionClassificationModel \
     --output_dir "$output_dir" \
@@ -83,22 +85,22 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --data-path "$data_path" \
     --chunk-size 1 \
     --dataloader-num-workers "${DATALOADER_NUM_WORKERS:-12}" \
-    --dataloader-prefetch-factor "${DATALOADER_PREFETCH_FACTOR:-4}" \
+    --dataloader-prefetch-factor "${DATALOADER_PREFETCH_FACTOR:-2}" \
     --dataloader-persistent-workers "${DATALOADER_PERSISTENT_WORKERS:-True}" \
     --dataloader-pin-memory "${DATALOADER_PIN_MEMORY:-True}" \
     --freeze-vision-tower True --freeze-llm True --freeze-merger True \
     --bf16 "${BF16:-True}" --tf32 "${TF32:-True}" --fp16 "${FP16:-False}" \
-    --num-train-epochs "${EPOCHS:-1000}" --max-steps "${MAX_STEPS:-40000}" \
-    --per-device-train-batch-size "${PER_DEVICE_BATCH_SIZE:-32}" \
+    --num-train-epochs "${EPOCHS:-1000}" --max-steps "${MAX_STEPS:-20000}" \
+    --per-device-train-batch-size "${PER_DEVICE_BATCH_SIZE:-64}" \
     --gradient-accumulation-steps "${GRADIENT_ACCUMULATION_STEPS:-1}" \
     --seed "${TRAIN_SEED:-42}" --data_seed "${DATA_SEED:-42}" \
-    --learning-rate "${LEARNING_RATE:-1e-4}" --weight-decay 0.001 \
+    --learning-rate "${LEARNING_RATE:-1.4e-4}" --weight-decay 0.001 \
     --optim "${OPTIM:-adamw_torch}" \
     --warmup-steps "${WARMUP_STEPS:-0.03}" --lr-scheduler-type cosine \
     --gradient-checkpointing "${GRADIENT_CHECKPOINTING:-False}" \
-    --save-strategy steps --save-steps "${SAVE_STEPS:-500}" \
+    --save-strategy steps --save-steps "${SAVE_STEPS:-250}" \
     --save-total-limit "${SAVE_TOTAL_LIMIT:-10}" \
-    --logging-steps "${LOGGING_STEPS:-3}" \
+    --logging-steps "${LOGGING_STEPS:-2}" \
     --report-to "${REPORT_TO:-tensorboard}" \
     --attn-implementation "${ATTN_IMPLEMENTATION:-flash_attention_2}" \
     --color_aug False --image_aug False --max_grad_norm 3 \
