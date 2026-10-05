@@ -60,6 +60,18 @@ released TaskNet's training pipeline.
 the exact PolarAPP TaskNet seven-channel layout above. Camera calibration and
 `polar_pixel_transform` must refer to the same image grid.
 
+`native_stokes` is the physically consistent RLBench path. Its archive stores
+canonical `[S0, DoLP, cos(2AoLP), sin(2AoLP)]` computed from the same four
+native analyzer renders. The loader appends calibrated camera rays; immediately
+before TaskNet, the adapter reorders the angle channels and replaces the rays
+with PolarAPP's normalized image coordinates. Unlike `sfp_proxy`, its first
+channel is the native polar-render S0 rather than Coppelia RGB luminance.
+
+When these canonical images are reduced from 256x256 to TaskNet's 64x64 input,
+the implementation first forms `Q=S0*DoLP*cos(2AoLP)` and
+`U=S0*DoLP*sin(2AoLP)`, area-resizes S0/Q/U, and only then reconstructs
+DoLP/AoLP. This avoids directly interpolating a wrapped angular field.
+
 The `sfp_proxy` conversion is implemented in
 `PolarAppTaskAwareEncoder.prepare_tasknet_input`; no offline archive rewrite is
 required. The calibrated `(vx,vy,vz)` rays remain available to PointACT's
@@ -116,11 +128,14 @@ when `polarapp_allow_random_init=True`. The dataset must provide aligned
 `observed_depth`, and `observed_depth_valid` (plus `pixel_valid` and
 `polar_pixel_transform` when applicable).
 
-An audit against the rendered V2 normal sidecars found that the released
-TaskNet head is opposite to the SfP-Wild comparison frame
-`(+left,+down,+forward)` on all three axes. TaskNet targets are therefore
-converted once as `(-nx, -ny, -nz)`. Depth-derived OpenCV normals are converted
-as `(-nx, ny, nz)`. Both then enter the cosine loss in the same frame.
+The four-analyzer RLBench calibration set (44 frames, 2,883,584 valid pixels)
+shows that the released TaskNet head uses an OpenGL-like camera convention.
+PointACT exposes the canonical pretraining frame
+`(+right,+down,+forward)`, so native TaskNet output is mapped once by a
+180-degree rotation about camera y as `(-nx, +ny, -nz)`. Depth-derived normals
+already use this canonical frame, and both enter the cosine loss without
+another sign flip. Do not infer this transform from the luminance-proxy V2
+input, whose TaskNet prediction is itself out of distribution.
 
 The normal head is always frozen and its output is detached because it is the
 pseudo-label teacher. With `polarapp_freeze=False`, the TaskNet feature body

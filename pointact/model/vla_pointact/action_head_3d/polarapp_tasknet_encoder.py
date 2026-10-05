@@ -196,6 +196,9 @@ class PolarAppTaskAwareEncoder(nn.Module):
     necessarily an S0 proxy because the current PointACT archive does not carry
     PolarAPP DemNet's four reconstructed analyzer images.
 
+    ``input_mode='native_stokes'`` performs the same layout conversion from a
+    canonical observation whose intensity is native-rendered S0, not a proxy.
+
     ``input_mode='tasknet7'`` accepts an already prepared PolarAPP TaskNet tensor
     without conversion.
     """
@@ -217,8 +220,10 @@ class PolarAppTaskAwareEncoder(nn.Module):
         bias: bool = False,
     ):
         super().__init__()
-        if input_mode not in ("sfp_proxy", "tasknet7"):
-            raise ValueError("polarapp_input_mode must be 'sfp_proxy' or 'tasknet7'")
+        if input_mode not in ("sfp_proxy", "native_stokes", "tasknet7"):
+            raise ValueError(
+                "polarapp_input_mode must be 'sfp_proxy', 'native_stokes' or 'tasknet7'"
+            )
         if pyramid_channels <= 0:
             raise ValueError("polarapp_pyramid_channels must be positive")
         if len(num_blocks) != 3 or len(heads) != 3:
@@ -363,13 +368,63 @@ class PolarAppTaskAwareEncoder(nn.Module):
         coordinates = self._normalized_coordinates(observation)
         return torch.cat(
             (
-                observation[:, 0:1],  # I_un used as the documented S0 proxy.
+                observation[:, 0:1],  # Native S0, or I_un only in legacy sfp_proxy mode.
                 observation[:, 1:2],
                 observation[:, 3:4],  # sin(2AoLP)
                 observation[:, 2:3],  # cos(2AoLP)
                 coordinates,
             ),
             dim=1,
+        )
+
+    @staticmethod
+    def resize_sfp_observation(
+        observation: Tensor, size: tuple[int, int]
+    ) -> Tensor:
+        """Resize SfP channels by averaging S0/Q/U, not DoLP/AoLP directly."""
+        if observation.ndim != 4 or observation.shape[1] != 7:
+            raise ValueError(
+                f"PolarAPP observation must be [N,7,H,W], got {tuple(observation.shape)}"
+            )
+        target = tuple(int(value) for value in size)
+        if len(target) != 2 or min(target) <= 0:
+            raise ValueError("TaskNet resize target must contain two positive integers")
+        if observation.shape[-2:] == target:
+            return observation
+
+        source_height, source_width = observation.shape[-2:]
+        mode = "area" if target[0] <= source_height and target[1] <= source_width else "bilinear"
+
+        def resize(value: Tensor) -> Tensor:
+            if mode == "area":
+                return F.interpolate(value, size=target, mode=mode)
+            return F.interpolate(value, size=target, mode=mode, align_corners=False)
+
+        s0 = observation[:, 0:1].clamp_min(0.0)
+        dolp = observation[:, 1:2].clamp(0.0, 1.0)
+        cos2 = observation[:, 2:3]
+        sin2 = observation[:, 3:4]
+        phase_norm = torch.sqrt(cos2.square() + sin2.square())
+        phase_valid = phase_norm > 1e-8
+        cos2 = torch.where(phase_valid, cos2 / phase_norm.clamp_min(1e-8), 0.0)
+        sin2 = torch.where(phase_valid, sin2 / phase_norm.clamp_min(1e-8), 0.0)
+
+        resized_s0 = resize(s0)
+        resized_q = resize(s0 * dolp * cos2)
+        resized_u = resize(s0 * dolp * sin2)
+        linear = torch.sqrt(resized_q.square() + resized_u.square())
+        intensity_valid = resized_s0 > 1e-8
+        angle_valid = intensity_valid & (linear > 1e-8)
+        resized_dolp = torch.where(
+            intensity_valid,
+            (linear / resized_s0.clamp_min(1e-8)).clamp(0.0, 1.0),
+            0.0,
+        )
+        resized_cos2 = torch.where(angle_valid, resized_q / linear.clamp_min(1e-8), 0.0)
+        resized_sin2 = torch.where(angle_valid, resized_u / linear.clamp_min(1e-8), 0.0)
+        rays = F.normalize(resize(observation[:, 4:7]), dim=1, eps=1e-8)
+        return torch.cat(
+            (resized_s0, resized_dolp, resized_cos2, resized_sin2, rays), dim=1
         )
 
     def forward_task_features(self, observation: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -419,14 +474,15 @@ class PolarAppTaskAwareEncoder(nn.Module):
         self,
         task_features: tuple[Tensor, Tensor, Tensor],
         normalize: bool = True,
-        output_frame: str = "sfp_wild",
+        output_frame: str = "canonical",
     ) -> Tensor:
-        """Decode TaskNet normals in either native or depth-loss coordinates.
+        """Decode TaskNet normals in native, legacy, or canonical coordinates.
 
-        The released head uses the opposite direction for all three axes from
-        the V2 SfP-Wild comparison frame ``(+left,+down,+forward)``.  This was
-        verified against the rendered V2 normal sidecars, so the shared loss
-        frame is obtained with ``(-nx,-ny,-nz)``.
+        The released TaskNet head uses an OpenGL-like camera convention.  The
+        four-analyzer RLBench calibration set uses PointACT's canonical camera
+        frame ``(+right,+down,+forward)``; the measured native-to-canonical
+        conversion is the 180-degree rotation about camera y,
+        ``(-nx,+ny,-nz)``.
         """
         normals = self.output(self.refinement(task_features[0]))
         if normalize:
@@ -435,7 +491,11 @@ class PolarAppTaskAwareEncoder(nn.Module):
             return normals
         if output_frame == "sfp_wild":
             return -normals
-        raise ValueError("output_frame must be 'tasknet' or 'sfp_wild'")
+        if output_frame in ("canonical", "pretraining"):
+            return torch.cat((-normals[:, :1], normals[:, 1:2], -normals[:, 2:]), dim=1)
+        raise ValueError(
+            "output_frame must be 'tasknet', 'sfp_wild', 'canonical', or 'pretraining'"
+        )
 
     def forward_features(self, observation: Tensor) -> tuple[Tensor, ...]:
         return self.build_pyramid(self.forward_task_features(observation))

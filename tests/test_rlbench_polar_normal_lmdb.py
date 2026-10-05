@@ -18,8 +18,8 @@ def test_generator_shapes_coordinates_and_no_gt_dependency():
     assert observation.shape == (7, height, width)
     assert prior.shape == (11, height, width)
     assert np.isfinite(observation).all() and np.isfinite(prior).all()
-    assert observation[4, 4, 4] > 0  # left of center is +x in PointACT.
-    assert observation[4, 4, 6] < 0
+    assert observation[4, 4, 4] < 0  # left of center is -x in canonical frame.
+    assert observation[4, 4, 6] > 0
     assert (prior[[2, 5, 8]] < 0).all()  # candidates face camera.
     np.testing.assert_allclose(prior[10, 4, 4], 128 / 255 * 0.3, rtol=1e-5)
     polar["valid_mask"][2, 2] = False
@@ -43,8 +43,8 @@ def test_native_cga_mode_reconstructs_proxy_analyzers_and_rightward_x():
     np.testing.assert_allclose(native[4], 128 / 255, atol=1e-6)
     np.testing.assert_allclose(native[0] + native[2], native[4], atol=1e-6)
     np.testing.assert_allclose(native[1] + native[3], native[4], atol=1e-6)
-    np.testing.assert_allclose(native[8], -robot[4], atol=1e-6)
-    np.testing.assert_allclose(native_prior[[0, 3, 6]], -robot_prior[[0, 3, 6]], atol=1e-6)
+    np.testing.assert_allclose(native[8:11], robot[4:7], atol=1e-6)
+    np.testing.assert_allclose(native_prior, robot_prior, atol=1e-6)
 
 
 def test_real_rlbench_frame():
@@ -67,7 +67,7 @@ def test_real_rlbench_frame():
         manifest, dataset_root=root, input_mode="native_cga", limit=1
     )[0]
     assert native["polar_observation"].shape == (11, 256, 256)
-    np.testing.assert_allclose(native["normal_gt"][0], -sample["normal_gt"][0], atol=1e-6)
+    np.testing.assert_allclose(native["normal_gt"], sample["normal_gt"], atol=1e-6)
     np.testing.assert_allclose(
-        native["polar_observation"][8], -sample["polar_observation"][4], atol=1e-6
+        native["polar_observation"][8:11], sample["polar_observation"][4:7], atol=1e-6
     )

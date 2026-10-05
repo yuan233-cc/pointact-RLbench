@@ -1,9 +1,9 @@
-"""Adapt a live RLBench polar observation to SfP-Wild model inputs.
+"""Adapt a live RLBench polar observation to canonical polar model inputs.
 
 The adapter mirrors the offline ``build_sfp_wild_inputs.py`` exporter.  In
 particular, it uses same-frame RGB luminance as the current ``I_un`` proxy and
-converts RLBench's negative-focal camera convention to the positive-focal
-camera frame used by PointACT's polar router.
+converts RLBench's negative-focal camera convention to PointACT's canonical
+positive-focal ``(+right,+down,+forward)`` camera frame.
 """
 
 from __future__ import annotations
@@ -61,9 +61,11 @@ def _viewing_directions(k: np.ndarray, height: int, width: int) -> np.ndarray:
         np.arange(width, dtype=np.float32),
         indexing="ij",
     )
+    rows += 0.5
+    cols += 0.5
     rays = np.stack(
         (
-            (k[0, 2] - cols) / k[0, 0],
+            (cols - k[0, 2]) / k[0, 0],
             (rows - k[1, 2]) / k[1, 1],
             np.ones((height, width), dtype=np.float32),
         )

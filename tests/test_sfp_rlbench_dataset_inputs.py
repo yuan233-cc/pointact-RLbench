@@ -50,6 +50,33 @@ def test_sfp_sidecar_assembles_official_seven_channels():
     )
 
 
+def test_native_stokes_sidecar_overrides_legacy_dense_polar_channels():
+    height, width = 3, 4
+    payload = io.BytesIO()
+    np.savez_compressed(
+        payload,
+        S0=np.full((height, width), 1.25, dtype=np.float16),
+        DoLP=np.full((height, width), 0.3, dtype=np.float16),
+        cos2AoLP=np.full((height, width), -0.6, dtype=np.float16),
+        sin2AoLP=np.full((height, width), 0.8, dtype=np.float16),
+        valid_mask=np.ones((height, width), dtype=np.uint8),
+        K=np.asarray([[10.0, 0.0, 2.0], [0.0, 10.0, 1.5], [0.0, 0.0, 1.0]], dtype=np.float32),
+        T_camera_from_world=np.eye(4, dtype=np.float32),
+    )
+    legacy_dense = np.zeros((4, height, width), dtype=np.float32)
+
+    dataset = object.__new__(LeRobotPointCloudDataset)
+    dataset.sfp_input_dir = "unused"
+    dataset.use_point_image_support = True
+    dataset.points_workspace = None
+    dataset._read_sidecar = lambda *_args: payload.getvalue()
+    item = dataset._load_sfp_inputs(0, 0, legacy_dense)
+
+    expected = torch.tensor([1.25, 0.3, -0.6, 0.8])[:, None, None].expand(-1, height, width)
+    torch.testing.assert_close(item["polar_images"][0, :4], expected, atol=3e-4, rtol=3e-4)
+    assert item["pixel_valid"].all()
+
+
 def test_workspace_mask_depends_on_camera_rays_not_depth_validity():
     dataset = object.__new__(LeRobotPointCloudDataset)
     dataset.points_workspace = {
@@ -65,11 +92,11 @@ def test_workspace_mask_depends_on_camera_rays_not_depth_validity():
 
 
 def test_sfp_view_direction_center_and_axes():
-    K = np.asarray([[10.0, 0.0, 2.0], [0.0, 10.0, 1.0], [0.0, 0.0, 1.0]])
+    K = np.asarray([[10.0, 0.0, 2.5], [0.0, 10.0, 1.5], [0.0, 0.0, 1.0]])
     rays = LeRobotPointCloudDataset._viewing_directions(K, 3, 5)
     np.testing.assert_allclose(rays[:, 1, 2], [0, 0, 1], atol=1e-7)
-    assert rays[0, 1, 0] > 0  # image-left
-    assert rays[0, 1, 4] < 0  # image-right
+    assert rays[0, 1, 0] < 0  # image-left
+    assert rays[0, 1, 4] > 0  # image-right
     assert rays[1, 0, 2] < 0  # image-top
     assert rays[1, 2, 2] > 0  # image-bottom
 

@@ -19,7 +19,9 @@ from pointact.model.vla_pointact.action_head_3d.ptv3_backbone import (
 )
 from pointact.model.vla_pointact.action_head_3d.sfp_wild_encoder import (
     SfpWildFeatureEncoder,
+    canonical_to_sfp_wild_observation,
     load_sfp_wild_checkpoint,
+    sfp_wild_to_canonical_normals,
 )
 from pointact.model.vla_pointact.action_head_3d.cga_transformer_encoder import (
     CgaTransformerFeatureEncoder,
@@ -1092,7 +1094,12 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         encoder = self._polar_encoder()
         encoder_dtype = next(encoder.parameters()).dtype
         flat_images = images.reshape(batch * views, 7, height, width).to(encoder_dtype)
-        encoder_args = [flat_images]
+        encoder_images = (
+            canonical_to_sfp_wild_observation(flat_images)
+            if self.config.polar_backbone == "sfp_wild"
+            else flat_images
+        )
+        encoder_args = [encoder_images]
         if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
             encoder_args.append(
                 values["polar_physical_prior"]
@@ -1116,8 +1123,8 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 if self.config.polar_fusion_mode == "workspace" else height
             )
             if flat_images.shape[-2:] != (task_size, task_size):
-                flat_images = F.interpolate(
-                    flat_images, size=(task_size, task_size), mode="bilinear", align_corners=False
+                flat_images = encoder.resize_sfp_observation(
+                    flat_images, size=(task_size, task_size)
                 )
             task_features = encoder.forward_task_features(flat_images)
             flat_levels = encoder.build_pyramid(task_features)
@@ -1207,8 +1214,10 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                     for level in polar_context["polar_feature_levels"]
                 )
                 with torch.no_grad():
-                    normal_targets = self.sfp_encoder.decode_normals(
-                        detached_levels, normalize=True
+                    normal_targets = sfp_wild_to_canonical_normals(
+                        self.sfp_encoder.decode_normals(
+                            detached_levels, normalize=True
+                        )
                     )
             elif self.config.polar_backbone == "polarapp_taskaware":
                 task_features = polar_context.get("tasknet_features")
@@ -1218,7 +1227,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                     normal_targets = self.polarapp_encoder.decode_normals(
                         tuple(feature.detach() for feature in task_features),
                         normalize=True,
-                        output_frame="sfp_wild",
+                        output_frame="canonical",
                     )
                     if normal_targets.shape[-2:] != tuple(polar_images.shape[-2:]):
                         normal_targets = F.interpolate(
@@ -1827,7 +1836,12 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         encoder = self._polar_encoder()
         encoder_dtype = next(encoder.parameters()).dtype
         flat_images = images.reshape(batch * views, 7, height, width).to(encoder_dtype)
-        encoder_args = [flat_images]
+        encoder_images = (
+            canonical_to_sfp_wild_observation(flat_images)
+            if self.config.polar_backbone == "sfp_wild"
+            else flat_images
+        )
+        encoder_args = [encoder_images]
         if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
             encoder_args.append(
                 values["polar_physical_prior"].reshape(batch * views, 11, height, width).to(encoder_dtype)
@@ -1847,8 +1861,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 if self.config.polar_fusion_mode == "workspace" else height
             )
             if flat_images.shape[-2:] != (task_size, task_size):
-                flat_images = F.interpolate(
-                    flat_images, size=(task_size, task_size), mode="bilinear", align_corners=False
+                flat_images = encoder.resize_sfp_observation(
+                    flat_images, size=(task_size, task_size)
                 )
             task_features = encoder.forward_task_features(flat_images)
             flat_levels = encoder.build_pyramid(task_features)
@@ -1938,8 +1952,10 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                     for level in polar_context["polar_feature_levels"]
                 )
                 with torch.no_grad():
-                    normal_targets = self.sfp_encoder.decode_normals(
-                        detached_levels, normalize=True
+                    normal_targets = sfp_wild_to_canonical_normals(
+                        self.sfp_encoder.decode_normals(
+                            detached_levels, normalize=True
+                        )
                     )
             elif self.config.polar_backbone == "polarapp_taskaware":
                 task_features = polar_context.get("tasknet_features")
@@ -1949,7 +1965,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                     normal_targets = self.polarapp_encoder.decode_normals(
                         tuple(feature.detach() for feature in task_features),
                         normalize=True,
-                        output_frame="sfp_wild",
+                        output_frame="canonical",
                     )
                     if normal_targets.shape[-2:] != tuple(polar_images.shape[-2:]):
                         normal_targets = F.interpolate(

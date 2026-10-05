@@ -225,9 +225,9 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                     "polarapp_taskaware requires polarapp_checkpoint; use "
                     "polarapp_allow_random_init=True only for explicit from-scratch tests"
                 )
-            if polarapp_input_mode not in ("sfp_proxy", "tasknet7"):
+            if polarapp_input_mode not in ("sfp_proxy", "native_stokes", "tasknet7"):
                 raise ValueError(
-                    "polarapp_input_mode must be 'sfp_proxy' or 'tasknet7'"
+                    "polarapp_input_mode must be 'sfp_proxy', 'native_stokes' or 'tasknet7'"
                 )
             if polarapp_pyramid_channels <= 0:
                 raise ValueError("polarapp_pyramid_channels must be positive")

@@ -61,6 +61,8 @@ def test_live_polar_frame_matches_training_sfp_layout():
     np.testing.assert_allclose(result["T_camera_from_world"][0], expected_pose)
     ray_norms = np.linalg.norm(result["polar_images"][0, 4:7], axis=0)
     np.testing.assert_allclose(ray_norms, 1.0, atol=1e-6)
+    assert result["polar_images"][0, 4, 0, 0] < 0  # image-left is canonical -x
+    assert result["polar_images"][0, 4, 0, 2] > 0  # image-right is canonical +x
 
 
 def test_adapter_rejects_an_already_converted_camera():

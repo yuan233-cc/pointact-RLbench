@@ -17,17 +17,19 @@ The loader generates the 7-channel robot observation and 11-channel CGA
 physical prior **on demand**; it does not duplicate 5051 dense frames on
 disk. The prior uses only DoLP, AoLP, proxy intensity, and camera calibration;
 it does not use the normal label. Candidate normals use refractive index 1.5
-by default. The coordinate frame is PointACT SfP: +x left, +y down, and
-camera-facing normals have negative z.
+by default. Both 7-channel and 11-channel layouts use the pretraining frame:
++x right, +y down, +z forward, with camera-facing normals oriented toward the
+camera.
 
 For mixed pretraining with native-CGA HAMMER and SfPUEL, set
 `input_mode: native_cga` on the RLBench dataset entry. This produces an
 11-channel observation by reconstructing four **proxy** analyzer intensities
-from DoLP/AoLP and RGB-luminance `I_un`. It converts rays, ambiguous-normal
-candidates, and normal labels together to +x right, +y down, +z forward.
-The original 7-channel `robot` mode remains the default for RLBench-only
-experiments. The mixed mode does not turn the proxy intensities into measured
-polarization; keep per-dataset validation separate.
+from DoLP/AoLP and RGB-luminance `I_un`. The original 7-channel `robot` mode
+remains the default for RLBench-only experiments, but it no longer changes the
+coordinate frame. Legacy V2 normal sidecars without coordinate metadata are
+recognized as +x-left and converted in memory. The mixed mode does not turn the
+proxy intensities into measured polarization; keep per-dataset validation
+separate.
 
 Important limitation: the corrected v2 renderer did not retain its four
 analyzer intensity images. `I_un` is an RGB-luminance proxy. Consequently,

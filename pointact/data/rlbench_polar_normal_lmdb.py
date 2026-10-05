@@ -28,9 +28,10 @@ def generate_rlbench_cga_input(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build a robot (7 CHW) or native-CGA (11 CHW) input without GT leakage.
 
-    The native-CGA mode uses +x right and approximates four analyzer
-    intensities from DoLP/AoLP and RGB-luminance I_un. These are not measured
-    analyzer images; the default robot mode keeps PointACT's +x-left frame.
+    Both layouts use the canonical pretraining frame
+    ``(+right,+down,+forward)``. Native-CGA additionally approximates four
+    analyzer intensities from DoLP/AoLP and RGB-luminance I_un. These are not
+    measured analyzer images.
     """
     if input_mode not in ("robot", "native_cga"):
         raise ValueError(f"Unsupported RLBench input mode: {input_mode}")
@@ -55,8 +56,6 @@ def generate_rlbench_cga_input(
     aolp = 0.5 * np.arctan2(sin2, cos2)
     candidates = ambiguous_normals(dolp, aolp, refractive_index=refractive_index)
     candidates = np.asarray(candidates, dtype=np.float32).copy()
-    if input_mode == "robot":
-        candidates[[0, 3, 6]] *= -1  # CGA +x right -> PointACT +x left.
     candidates *= (mask & angle_mask)[None]
 
     # Ideal I0/I45/I90/I135 reconstructed from corrected Stokes ratios and
@@ -65,9 +64,9 @@ def generate_rlbench_cga_input(
     spec = minimum_filter(contrast, size=3, mode="nearest")
     spec = np.where(mask & angle_mask, spec, 0).astype(np.float32)
     yy, xx = np.mgrid[:dolp.shape[0], :dolp.shape[1]].astype(np.float32)
+    yy += 0.5
+    xx += 0.5
     ray_x = (xx - k[0, 2]) / k[0, 0]
-    if input_mode == "robot":
-        ray_x = -ray_x
     rays = np.stack((ray_x, (yy - k[1, 2]) / k[1, 1], np.ones_like(xx)))
     rays /= np.maximum(np.linalg.norm(rays, axis=0, keepdims=True), 1e-8)
     if input_mode == "native_cga":
@@ -189,8 +188,17 @@ class RLBenchPolarNormalLmdbDataset(PolarNormalDataset):
             polar, sfp, refractive_index=self.refractive_index, input_mode=self.input_mode
         )
         normal_gt = np.asarray(normal["normal_gt"], dtype=np.float32).copy()
-        if self.input_mode == "native_cga":
-            normal_gt[..., 0] *= -1.0  # PointACT +x left -> CGA +x right.
+        stored_frame = normal.get("normal_coordinate_frame")
+        if stored_frame is None:
+            # V2 sidecars written before the canonical-frame migration stored
+            # +x-left normals without schema metadata.
+            stored_frame = "sfp_wild"
+        else:
+            stored_frame = str(np.asarray(stored_frame).item())
+        if stored_frame in ("sfp_wild", "+left,+down,+forward"):
+            normal_gt[..., 0] *= -1.0
+        elif stored_frame not in ("canonical", "opencv", "+right,+down,+forward"):
+            raise ValueError(f"Unsupported normal coordinate frame: {stored_frame!r}")
         record = {
             "polar_observation": observation,
             "physical_prior": prior,

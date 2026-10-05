@@ -5,7 +5,8 @@ Each LMDB entry is aligned with the existing ``episode-frame`` key and stores a
 full-resolution normal map rather than object crops.  Normals are estimated
 from archived Coppelia depth with same-object finite differences, intersected
 with the corrected dense-polar validity mask, oriented toward the front camera,
-and converted to the SfP router convention (+x left, +y down, +z forward).
+and stored in the canonical pretraining convention
+(+x right, +y down, +z forward).
 """
 
 from __future__ import annotations
@@ -58,10 +59,15 @@ def audit_sidecar(path: Path, expected_keys: list[bytes]) -> dict[str, float | i
                     mask = np.asarray(record["normal_valid_mask"], dtype=bool)
                     K = np.asarray(record["K"], dtype=np.float32)
                     transform = np.asarray(record["T_camera_from_world"], dtype=np.float32)
+                    coordinate_frame = str(
+                        np.asarray(record["normal_coordinate_frame"]).item()
+                    ) if "normal_coordinate_frame" in record else None
                 if normal.shape != (256, 256, 3) or mask.shape != (256, 256):
                     raise ValueError(f"{key!r}: invalid normal/mask shapes")
                 if K.shape != (3, 3) or transform.shape != (4, 4):
                     raise ValueError(f"{key!r}: invalid calibration shapes")
+                if coordinate_frame != "canonical":
+                    raise ValueError(f"{key!r}: missing canonical normal coordinate metadata")
                 if not (np.isfinite(normal).all() and np.isfinite(K).all()
                         and np.isfinite(transform).all()):
                     raise ValueError(f"{key!r}: non-finite data")
@@ -80,9 +86,11 @@ def audit_sidecar(path: Path, expected_keys: list[bytes]) -> dict[str, float | i
                     np.arange(256, dtype=np.float32),
                     indexing="ij",
                 )
+                rows += 0.5
+                cols += 0.5
                 rays = np.stack(
                     (
-                        (K[0, 2] - cols) / K[0, 0],
+                        (cols - K[0, 2]) / K[0, 0],
                         (rows - K[1, 2]) / K[1, 1],
                         np.ones_like(rows),
                     ),
@@ -137,33 +145,34 @@ def encode_record(
     polar_valid = dense_polar[3] > 0.5
     valid = geometry_valid & polar_valid
 
-    # T_camera_from_world uses an OpenCV-like (+right,+down,+forward) frame.
-    # The SfP router negates camera x, yielding (+left,+down,+forward).
+    # T_camera_from_world and all newly generated training data share the
+    # canonical (+right,+down,+forward) pretraining frame.
     normal_opencv = normal_world @ camera_from_world[:3, :3].T
-    normal_sfp = normal_opencv * np.asarray([-1.0, 1.0, 1.0], dtype=np.float32)
-    lengths = np.linalg.norm(normal_sfp, axis=-1)
-    valid &= np.isfinite(normal_sfp).all(axis=-1) & np.isfinite(lengths) & (lengths > 1e-8)
-    normal_sfp[valid] /= lengths[valid, None]
-    normal_sfp[~valid] = 0.0
+    lengths = np.linalg.norm(normal_opencv, axis=-1)
+    valid &= np.isfinite(normal_opencv).all(axis=-1) & np.isfinite(lengths) & (lengths > 1e-8)
+    normal_opencv[valid] /= lengths[valid, None]
+    normal_opencv[~valid] = 0.0
 
-    # Independently verify that valid normals face the camera in the same SfP
-    # coordinate convention used by PointACT's viewing-direction channels.
+    # Independently verify that valid normals face the camera in the canonical
+    # coordinate convention used by pretraining and PointACT.
     height, width = depth.shape
     rows, cols = np.meshgrid(
         np.arange(height, dtype=np.float32),
         np.arange(width, dtype=np.float32),
         indexing="ij",
     )
+    rows += 0.5
+    cols += 0.5
     rays = np.stack(
         (
-            (K[0, 2] - cols) / K[0, 0],
+            (cols - K[0, 2]) / K[0, 0],
             (rows - K[1, 2]) / K[1, 1],
             np.ones_like(rows),
         ),
         axis=-1,
     )
     rays /= np.linalg.norm(rays, axis=-1, keepdims=True).clip(1e-8)
-    facing_dot = np.sum(normal_sfp * rays, axis=-1)
+    facing_dot = np.sum(normal_opencv * rays, axis=-1)
     if valid.any() and float(np.max(facing_dot[valid])) > 1e-4:
         raise ValueError("normal orientation check failed")
 
@@ -179,8 +188,9 @@ def encode_record(
     output = io.BytesIO()
     np.savez_compressed(
         output,
-        normal_gt=normal_sfp.astype(np.float16),
+        normal_gt=normal_opencv.astype(np.float16),
         normal_valid_mask=valid.astype(np.uint8),
+        normal_coordinate_frame=np.asarray("canonical"),
         K=np.asarray(K, dtype=np.float32),
         T_camera_from_world=np.asarray(camera_from_world, dtype=np.float32),
     )
@@ -258,7 +268,7 @@ def main() -> None:
             "normal_shape": [256, 256, 3],
             "mask_field": "normal_valid_mask",
             "mask_definition": "geometry normal valid AND corrected dense polar valid",
-            "coordinate_convention": "+x left, +y down, +z forward; camera-facing",
+            "coordinate_convention": "+x right, +y down, +z forward; camera-facing",
             "render_scope": "full scene; no object crop or object-only supervision",
             "calibration_fields": ["K", "T_camera_from_world"],
             "key_format": "{global_episode_index}-{episode_frame_index}",
@@ -396,7 +406,7 @@ def main() -> None:
         "normal_shape": [256, 256, 3],
         "mask_field": "normal_valid_mask",
         "mask_definition": "geometry normal valid AND corrected dense polar valid",
-        "coordinate_convention": "+x left, +y down, +z forward; camera-facing",
+        "coordinate_convention": "+x right, +y down, +z forward; camera-facing",
         "render_scope": "full scene; no object crop or object-only supervision",
         "calibration_fields": ["K", "T_camera_from_world"],
         "key_format": "{global_episode_index}-{episode_frame_index}",

@@ -280,7 +280,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
 
     @staticmethod
     def _viewing_directions(K: np.ndarray, height: int, width: int) -> np.ndarray:
-        """Build the SfP-Wild (+left, +down, +forward) unit ray image."""
+        """Build canonical (+right, +down, +forward) pixel-center rays."""
         K = np.asarray(K, dtype=np.float32)
         if (K.shape != (3, 3) or not np.isfinite(K).all()
                 or K[0, 0] <= 0 or K[1, 1] <= 0):
@@ -290,8 +290,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             np.arange(width, dtype=np.float32),
             indexing="ij",
         )
+        rows += 0.5
+        cols += 0.5
         rays = np.stack((
-            (K[0, 2] - cols) / K[0, 0],
+            (cols - K[0, 2]) / K[0, 0],
             (rows - K[1, 2]) / K[1, 1],
             np.ones((height, width), dtype=np.float32),
         ))
@@ -326,6 +328,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             np.arange(width, dtype=np.float64),
             indexing="ij",
         )
+        rows += 0.5
+        cols += 0.5
         directions_camera = np.stack(
             (
                 (cols - K[0, 2]) / K[0, 0],
@@ -358,15 +362,26 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         value = self._read_sidecar(self.sfp_input_dir, ep_idx, frame_idx)
         source = io.BytesIO(value) if isinstance(value, bytes) else value
         with np.load(source) as record:
-            i_un = np.asarray(record["I_un"])
+            intensity_name = "S0" if "S0" in record else "I_un"
+            i_un = np.asarray(record[intensity_name])
             K = np.asarray(record["K"], dtype=np.float32)
             camera_from_world = np.asarray(record["T_camera_from_world"], dtype=np.float32)
+            embedded_polar = None
+            embedded_names = ("DoLP", "cos2AoLP", "sin2AoLP", "valid_mask")
+            if any(name in record for name in embedded_names):
+                if not all(name in record for name in embedded_names):
+                    raise ValueError(
+                        "SfP sidecar must contain all of DoLP/cos2AoLP/sin2AoLP/valid_mask"
+                    )
+                embedded_polar = np.stack(
+                    [np.asarray(record[name], dtype=np.float32) for name in embedded_names]
+                )
             prior = np.asarray(record["physical_prior"], dtype=np.float32) if "physical_prior" in record else None
             if prior is None and all(key in record for key in ("est", "spec")):
                 prior = np.concatenate(
                     (
                         np.asarray(record["est"], dtype=np.float32),
-                        np.asarray(record["I_un"], dtype=np.float32)[None],
+                        np.asarray(record[intensity_name], dtype=np.float32)[None],
                         np.asarray(record["spec"], dtype=np.float32).reshape(1, *i_un.shape),
                     ),
                     axis=0,
@@ -383,12 +398,26 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError(
                 f"SfP intensity and dense polar shapes differ: {i_un.shape} vs {dense_polar.shape}"
             )
+        tasknet_polar = dense_polar
+        if embedded_polar is not None:
+            if embedded_polar.shape != (4, *i_un.shape):
+                raise ValueError(
+                    "Embedded TaskNet polar channels must be [4,H,W], got "
+                    f"{embedded_polar.shape}"
+                )
+            if not np.isfinite(embedded_polar).all():
+                raise ValueError("Embedded TaskNet polar channels contain non-finite values")
+            if np.any((embedded_polar[0] < 0) | (embedded_polar[0] > 1.001)):
+                raise ValueError("Embedded TaskNet DoLP lies outside [0,1]")
+            if np.any(np.abs(embedded_polar[1:3]) > 1.001):
+                raise ValueError("Embedded TaskNet AoLP channels lie outside [-1,1]")
+            tasknet_polar = embedded_polar
         if camera_from_world.shape != (4, 4) or not np.isfinite(camera_from_world).all():
             raise ValueError("T_camera_from_world must be a finite 4x4 matrix")
         if not np.isfinite(i_un).all():
             raise ValueError("SfP I_un contains non-finite values")
         rays = self._viewing_directions(K, *i_un.shape)
-        polar_images = np.concatenate((i_un[None], dense_polar[:3], rays), axis=0)
+        polar_images = np.concatenate((i_un[None], tasknet_polar[:3], rays), axis=0)
         workspace_mask = (
             np.ones(i_un.shape, dtype=bool)
             if self.use_point_image_support
@@ -399,7 +428,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             "polar_K": torch.from_numpy(K[None].copy()),
             "T_camera_from_world": torch.from_numpy(camera_from_world[None].copy()),
             "view_valid": torch.ones(1, dtype=torch.bool),
-            "pixel_valid": torch.from_numpy((dense_polar[3:4] > 0.5).copy()),
+            "pixel_valid": torch.from_numpy((tasknet_polar[3:4] > 0.5).copy()),
             "polar_workspace_mask": torch.from_numpy(workspace_mask[None].copy()),
         }
         if self.use_point_image_support:

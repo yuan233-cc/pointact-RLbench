@@ -24,8 +24,11 @@ Each batch must contain:
 SfP-Wild loads `I_un` and `DoLP` from its saved polarization array without an
 extra normalization step; AoLP is in radians. The helper
 `assemble_onlyiun_pol_vd` builds the seven channels and generates rays from the
-actual `K`. It follows the released `vd_local.npy` convention: +x is image-left,
-+y image-bottom, and +z forward. Images must be undistorted before this path.
+actual `K` using pixel centers in the canonical pretraining convention: +x is
+image-right, +y image-bottom, and +z forward. Images must be undistorted before
+this path. Immediately before a released SfP-Wild checkpoint, PointACT negates
+only `ray_x` to match its legacy `vd_local.npy`; decoded SfP normals are mapped
+back by the inverse x conversion.
 
 Point augmentation must retain
 `T_model_from_world=[R_aug,-center;0,1]`, then compute:

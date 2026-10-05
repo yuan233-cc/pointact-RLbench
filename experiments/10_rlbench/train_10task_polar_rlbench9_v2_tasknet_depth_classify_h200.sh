@@ -101,7 +101,7 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --warmup-steps "${WARMUP_STEPS:-0.03}" --lr-scheduler-type cosine \
     --gradient-checkpointing "${GRADIENT_CHECKPOINTING:-False}" \
     --save-strategy steps --save-steps "${SAVE_STEPS:-250}" \
-    --save-total-limit "${SAVE_TOTAL_LIMIT:-10}" \
+    --save-total-limit "${SAVE_TOTAL_LIMIT:-2}" \
     --logging-steps "${LOGGING_STEPS:-2}" \
     --report-to "${REPORT_TO:-tensorboard}" \
     --attn-implementation "${ATTN_IMPLEMENTATION:-flash_attention_2}" \
@@ -120,7 +120,7 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --polarapp_checkpoint "$tasknet_checkpoint" \
     --polarapp_allow_random_init False --polarapp_freeze "$tasknet_freeze" \
     --polarapp_pyramid_channels "${TASKNET_PYRAMID_CHANNELS:-192}" \
-    --polarapp_input_mode sfp_proxy \
+    --polarapp_input_mode "${TASKNET_INPUT_MODE:-native_stokes}" \
     --polarapp_input_size "${TASKNET_INPUT_SIZE:-64}" "${tasknet_lr_args[@]}" \
     --sfp_feature_levels x1 x2 x3 x4 x5 \
     --polar_neighbor_radius "${POLAR_NEIGHBOR_RADIUS:-2}" \

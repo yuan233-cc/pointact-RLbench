@@ -22,7 +22,7 @@ lerobot_datasets:
     point_feature_mode: xyzrgb_polar
     polar_feature_normalization: rgb
     polar_dense_dirname: polar_frontview_dense
-    sfp_input_dirname: sfp_frontview_rgb_luminance_proxy
+    sfp_input_dirname: tasknet_frontview_native_stokes
     depth_point_pixel_dirname: point_pixel_indices
     point_pixel_dirname: point_pixel_indices
     use_point_image_support: True

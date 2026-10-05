@@ -39,11 +39,13 @@ gradients through the remaining polar/point fusion context.
 Predicted depth is back-projected with the calibrated intrinsics. Central
 finite differences give a camera-facing normal at each interior pixel.
 SfP-Wild's pretrained normal decoder produces a unit-normal pseudo-target from
-the same five image feature levels. After converting the depth normal's x axis
-from OpenCV `+right` to SfP-Wild `+left`, the consistency term is the masked
-cosine distance `1 - dot(n_depth, stopgrad(n_sfp))`. The SfP normal decoder is
-always frozen/eval and the target is detached, so the objective updates the
-depth/fusion path rather than moving its own target. It also uses:
+the same five image feature levels. Its legacy output is converted once at the
+checkpoint boundary into the canonical pretraining frame
+`(+right,+down,+forward)`. Depth-derived normals already use that frame, so the
+consistency term is the masked cosine distance
+`1 - dot(n_depth, stopgrad(n_polar))`. The normal decoder is always frozen/eval
+and the target is detached, so the objective updates the depth/fusion path
+rather than moving its own target. It also uses:
 
 - masked point modelling: points at 30% of observed depth pixels are removed
   before PointACT and supervise a robust log-depth error, which fixes metric
@@ -117,10 +119,12 @@ holdout pixels and a Cauchy penalty with bounded outlier influence. This makes
 the dataset trainable for robust fusion, but it is not a clean depth-accuracy
 benchmark.
 
-The SfP `+left,+down,+forward` x-axis convention was checked against 95,084
-valid auxiliary renderer normals. Negating the OpenCV camera x component gave
-a median absolute doubled-angle phase agreement of 0.955. The auxiliary GT
-normals are used only for this audit and are not loaded by training.
+The older SfP `+left,+down,+forward` convention was checked against 95,084
+valid auxiliary renderer normals. That legacy result is retained for checkpoint
+compatibility, but the public dataset/model contract is now canonical
+`+right,+down,+forward`; conversion occurs only around the released SfP-Wild
+encoder and decoder. The auxiliary GT normals are used only for the audit and
+are not loaded by training.
 
 The self-supervised loss now reaches PointACT attention through the rasterized
 fused point hidden states. The decoder's completion feature also reaches the

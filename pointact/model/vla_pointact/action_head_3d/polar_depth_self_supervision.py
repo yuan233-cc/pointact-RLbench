@@ -329,6 +329,8 @@ def depth_to_camera_points(depth: Tensor, intrinsics: Tensor) -> Tensor:
         torch.arange(width, device=depth.device, dtype=depth.dtype),
         indexing="ij",
     )
+    rows = rows + 0.5
+    cols = cols + 0.5
     cols = cols.expand(n, -1, -1)
     rows = rows.expand(n, -1, -1)
     z = depth[:, 0]
@@ -520,12 +522,9 @@ class PolarDepthSelfSupervision(nn.Module):
         )
         target_normals = F.normalize(target_normals, dim=1, eps=1e-6)
 
-        # Polar pseudo-targets use the shared +left,+down,+forward comparison
-        # frame while calibrated pinhole geometry uses +right,+down,+forward.
-        predicted_sfp_normals = torch.cat(
-            (-normals[:, 0:1], normals[:, 1:]), dim=1
-        )
-        cosine = (predicted_sfp_normals * target_normals).sum(
+        # Both depth geometry and detached polar teachers use PointACT's
+        # canonical pretraining frame: +right, +down, +forward.
+        cosine = (normals * target_normals).sum(
             dim=1, keepdim=True
         ).clamp(-1.0, 1.0)
         normal_error = 1.0 - cosine

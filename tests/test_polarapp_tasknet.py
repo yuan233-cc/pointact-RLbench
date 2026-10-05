@@ -59,6 +59,40 @@ def test_sfp_proxy_conversion_reorders_angles_and_replaces_rays():
     assert converted[:, 4:7].abs().max() <= 1.0
 
 
+def test_native_stokes_conversion_matches_official_tasknet_layout():
+    encoder = PolarAppTaskAwareEncoder(
+        input_mode="native_stokes", num_blocks=(1, 1, 1), pyramid_channels=8
+    )
+    observation = torch.zeros(1, 7, 2, 4)
+    observation[:, 0] = 1.2
+    observation[:, 1] = 0.4
+    observation[:, 2] = -0.8
+    observation[:, 3] = 0.6
+    observation[:, 4:] = 7.0
+    converted = encoder.prepare_tasknet_input(observation)
+    torch.testing.assert_close(converted[:, :4], observation[:, [0, 1, 3, 2]])
+    assert torch.equal(converted[:, 6], torch.ones_like(converted[:, 6]))
+    assert converted[:, 4:7].abs().max() <= 1.0
+
+
+def test_sfp_resize_averages_stokes_before_recovering_polar_channels():
+    observation = torch.zeros(1, 7, 2, 2)
+    observation[:, 0] = 1.0
+    observation[:, 1] = 1.0
+    # Opposite doubled-angle directions cancel inside the downsampled cell.
+    observation[:, 2, :, 0] = 1.0
+    observation[:, 2, :, 1] = -1.0
+    observation[:, 6] = 1.0
+
+    resized = PolarAppTaskAwareEncoder.resize_sfp_observation(observation, (1, 1))
+
+    torch.testing.assert_close(resized[:, 0], torch.ones(1, 1, 1))
+    torch.testing.assert_close(resized[:, 1:4], torch.zeros(1, 3, 1, 1))
+    torch.testing.assert_close(
+        torch.linalg.vector_norm(resized[:, 4:7], dim=1), torch.ones(1, 1, 1)
+    )
+
+
 def test_tasknet_freeze_leaves_new_pyramid_trainable():
     encoder = PolarAppTaskAwareEncoder(num_blocks=(1, 1, 1), pyramid_channels=8)
     encoder.set_tasknet_trainable(False)
@@ -93,12 +127,17 @@ def test_released_normal_head_is_unit_length_and_uses_shared_loss_frame():
     with torch.no_grad():
         features = encoder.forward_task_features(torch.randn(1, 7, 8, 10))
         native = encoder.decode_normals(features, output_frame="tasknet")
-        shared = encoder.decode_normals(features, output_frame="sfp_wild")
+        legacy = encoder.decode_normals(features, output_frame="sfp_wild")
+        canonical = encoder.decode_normals(features, output_frame="canonical")
     torch.testing.assert_close(
         torch.linalg.vector_norm(native, dim=1), torch.ones(1, 8, 10),
         atol=1e-5, rtol=1e-5,
     )
-    torch.testing.assert_close(shared, -native)
+    torch.testing.assert_close(legacy, -native)
+    torch.testing.assert_close(
+        canonical,
+        torch.cat((-native[:, :1], native[:, 1:2], -native[:, 2:]), dim=1),
+    )
 
 
 def test_normal_teacher_can_stay_frozen_while_tasknet_features_train():
@@ -157,7 +196,7 @@ def test_tasknet_depth_branch_backpropagates_without_moving_normal_teacher():
     with torch.no_grad():
         targets = encoder.decode_normals(
             tuple(level.detach() for level in task_features),
-            output_frame="sfp_wild",
+            output_frame="canonical",
         )[:, None]
 
     point_channels = (4, 6, 8, 10, 12)

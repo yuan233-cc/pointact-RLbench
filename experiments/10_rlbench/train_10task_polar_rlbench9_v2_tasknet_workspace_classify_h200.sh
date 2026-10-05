@@ -13,10 +13,11 @@ export PTV3_APPLY_POINT_CA="${PTV3_APPLY_POINT_CA:-False}"
 export DATA_PATH="${DATA_PATH:-experiments/10_rlbench/data_configs/data-10task-polar-rlbench9-v2-tasknet-workspace.yaml}"
 export OUTPUT_DIR="${OUTPUT_DIR:-$repo_root/checkpoints/rlbench/pointact-rlbench9-v2-tasknet-workspace-classify-h200}"
 
-# Geometry ablation: retain only depth->normal / frozen-TaskNet normal consistency.
+# Geometry objective: TaskNet normal consistency remains dominant, while a
+# small held-out sparse-depth term anchors the decoder's metric depth scale.
 export POLAR_DEPTH_LOSS_WEIGHT="${POLAR_DEPTH_LOSS_WEIGHT:-1.0}"
 export POLAR_CONSISTENCY_WEIGHT="${POLAR_CONSISTENCY_WEIGHT:-1.0}"
-export SPARSE_DEPTH_WEIGHT="${SPARSE_DEPTH_WEIGHT:-0.0}"
+export SPARSE_DEPTH_WEIGHT="${SPARSE_DEPTH_WEIGHT:-0.1}"
 export DEPTH_SMOOTHNESS_WEIGHT="${DEPTH_SMOOTHNESS_WEIGHT:-0.0}"
 
 # Dense workspace attention is quadratic in points x workspace pixels.  Start at

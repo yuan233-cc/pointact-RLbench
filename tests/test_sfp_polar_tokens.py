@@ -11,7 +11,9 @@ from pointact.model.vla_pointact.action_head_3d.polar_router import (
 from pointact.model.vla_pointact.action_head_3d.sfp_wild_encoder import (
     SfpWildFeatureEncoder,
     assemble_onlyiun_pol_vd,
+    canonical_to_sfp_wild_observation,
     load_sfp_wild_checkpoint,
+    sfp_wild_to_canonical_normals,
 )
 
 
@@ -49,9 +51,12 @@ class SfpEncoderTest(unittest.TestCase):
         self.assertEqual(image.shape, (1, 1, 7, 33, 35))
         self.assertTrue(torch.allclose(image[:, :, 2], torch.zeros_like(value[:, :, 0]), atol=1e-6))
         self.assertTrue(torch.allclose(image[:, :, 3], torch.ones_like(value[:, :, 0]), atol=1e-6))
+        self.assertLess(image[0, 0, 4, 0, 0].item(), 0.0)
+        legacy_image = canonical_to_sfp_wild_observation(image.flatten(0, 1))
+        self.assertGreater(legacy_image[0, 4, 0, 0].item(), 0.0)
         encoder = SfpWildFeatureEncoder(residual_num=1).eval()
         with torch.no_grad():
-            outputs = encoder.forward_features(image.flatten(0, 1))
+            outputs = encoder.forward_features(legacy_image)
         self.assertEqual(
             [tuple(output.shape) for output in outputs],
             [(1, 64, 33, 35), (1, 128, 16, 17), (1, 256, 8, 8),
@@ -68,6 +73,9 @@ class SfpEncoderTest(unittest.TestCase):
         self.assertTrue(torch.allclose(
             normalized.norm(dim=1), torch.ones(2, 33, 35), atol=1e-5, rtol=1e-5
         ))
+        canonical = sfp_wild_to_canonical_normals(normalized)
+        self.assertTrue(torch.allclose(canonical[:, 0], -normalized[:, 0]))
+        self.assertTrue(torch.allclose(canonical[:, 1:], normalized[:, 1:]))
 
     def test_full_and_encoder_only_checkpoint_loading(self):
         import tempfile

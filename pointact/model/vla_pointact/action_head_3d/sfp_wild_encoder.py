@@ -20,6 +20,27 @@ import torch
 from torch import Tensor, nn
 
 
+def canonical_to_sfp_wild_observation(observation: Tensor) -> Tensor:
+    """Convert canonical seven-channel input to the released SfP-Wild frame.
+
+    PointACT exposes ``(+right,+down,+forward)`` everywhere outside this
+    compatibility boundary.  The released SfP-Wild checkpoint instead expects
+    its viewing-ray x channel to point toward image-left.
+    """
+    if observation.ndim != 4 or observation.shape[1] != 7:
+        raise ValueError("SfP observation must be [N,7,H,W]")
+    return torch.cat(
+        (observation[:, :4], -observation[:, 4:5], observation[:, 5:]), dim=1
+    )
+
+
+def sfp_wild_to_canonical_normals(normals: Tensor) -> Tensor:
+    """Convert released SfP-Wild normals to canonical camera coordinates."""
+    if normals.ndim != 4 or normals.shape[1] != 3:
+        raise ValueError("SfP normals must be [N,3,H,W]")
+    return torch.cat((-normals[:, :1], normals[:, 1:]), dim=1)
+
+
 class _DoubleConv(nn.Module):
     def __init__(
         self,
@@ -337,23 +358,18 @@ def load_sfp_wild_checkpoint(
 
 
 def viewing_directions_from_K(K: Tensor, height: int, width: int) -> Tensor:
-    """Generate SfP-Wild viewing directions from real image intrinsics.
-
-    The released ``vd_local.npy`` uses +x toward image-left, +y toward
-    image-bottom and +z forward. This is the x-negated OpenCV camera ray.
-    ``K`` must describe the actual (already undistorted) image geometry.
-    """
+    """Generate canonical pixel-center rays from real image intrinsics."""
     if K.shape[-2:] != (3, 3):
         raise ValueError(f"K must end in [3,3], got {tuple(K.shape)}")
     if not torch.isfinite(K).all() or (K[..., 0, 0] <= 0).any() or (K[..., 1, 1] <= 0).any():
         raise ValueError("K must be finite with positive focal lengths")
-    rows = torch.arange(height, device=K.device, dtype=K.dtype)
-    cols = torch.arange(width, device=K.device, dtype=K.dtype)
+    rows = torch.arange(height, device=K.device, dtype=K.dtype) + 0.5
+    cols = torch.arange(width, device=K.device, dtype=K.dtype) + 0.5
     vv, uu = torch.meshgrid(rows, cols, indexing="ij")
     lead = K.shape[:-2]
     uu = uu.expand(*lead, height, width)
     vv = vv.expand(*lead, height, width)
-    x = (K[..., 0, 2, None, None] - uu) / K[..., 0, 0, None, None]
+    x = (uu - K[..., 0, 2, None, None]) / K[..., 0, 0, None, None]
     y = (vv - K[..., 1, 2, None, None]) / K[..., 1, 1, None, None]
     rays = torch.stack((x, y, torch.ones_like(x)), dim=-3)
     return torch.nn.functional.normalize(rays, dim=-3)
@@ -365,7 +381,11 @@ def assemble_onlyiun_pol_vd(
     aolp_radians: Tensor,
     K: Tensor,
 ) -> Tensor:
-    """Assemble the official seven channels without changing input units."""
+    """Assemble canonical seven channels without changing input units.
+
+    Use :func:`canonical_to_sfp_wild_observation` only at the boundary of a
+    released SfP-Wild encoder.
+    """
     if i_un.shape != dolp.shape or i_un.shape != aolp_radians.shape:
         raise ValueError("I_un, DoLP and AoLP must have identical [B,V,1,H,W] shapes")
     if i_un.ndim != 5 or i_un.shape[2] != 1:

@@ -185,8 +185,8 @@ def main() -> None:
             "requires re-rendering S0 from the corrected scene snapshots."
         ),
         "camera_convention": (
-            "positive-focal OpenCV-like router frame; SfP ray x is negated by the loader "
-            "to match SfP-Wild (+left,+down,+forward)"
+            "canonical positive-focal frame (+right,+down,+forward); legacy SfP-Wild "
+            "conversion happens only at the released checkpoint boundary"
         ),
         "max_projection_roundtrip_error_pixels": maximum_projection_error,
     }
