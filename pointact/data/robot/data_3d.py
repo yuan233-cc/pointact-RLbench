@@ -78,6 +78,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         polar_dense_frames_dir: str | None = None,
         sfp_input_dirname: str | None = None,
         depth_point_pixel_dirname: str | None = None,
+        use_point_image_support: bool = False,
         vlm_image_mode: str = "rgb",
         point_pixel_dirname: str | None = None,
         material_profiles_file: str | None = None,
@@ -128,7 +129,9 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         has_dense_polar = bool(polar_dense_dirname) != bool(polar_dense_frames_dir)
         if polar_dense_dirname and polar_dense_frames_dir:
             raise ValueError("Configure only one dense polar source")
-        material_requested = bool(point_pixel_dirname or material_profiles_file or material_candidate_names)
+        self.use_point_image_support = use_point_image_support
+        material_requested = bool(material_profiles_file or material_candidate_names
+                                  or (point_pixel_dirname and not use_point_image_support))
         if material_requested and not (point_pixel_dirname and material_profiles_file and has_dense_polar):
             raise ValueError("Material conditioning requires point pixels, material profiles, and one dense polar source")
         if vlm_image_mode == "polar" and not has_dense_polar:
@@ -137,6 +140,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError("SfP-Wild inputs require one dense polar source")
         if depth_point_pixel_dirname and not sfp_input_dirname:
             raise ValueError("Sparse depth rasterization requires SfP-Wild camera metadata")
+        if use_point_image_support and not (sfp_input_dirname and (point_pixel_dirname or depth_point_pixel_dirname)):
+            raise ValueError("Image support requires dense inputs and a current-observation point pixel sidecar")
         if has_dense_polar and vlm_image_mode != "polar" and not material_requested and not sfp_input_dirname:
             raise ValueError(
                 "A dense polar source requires polar VLM image mode, material conditioning, "
@@ -293,6 +298,62 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         rays /= np.linalg.norm(rays, axis=0, keepdims=True).clip(1e-8)
         return rays.astype(np.float32)
 
+    def _workspace_ray_mask(
+        self, K: np.ndarray, camera_from_world: np.ndarray, height: int, width: int
+    ) -> np.ndarray:
+        """Pixels whose OpenCV camera rays intersect the configured world AABB.
+
+        This mask deliberately does not depend on depth.  Polar pixels behind a
+        missing/corrupt depth sample therefore remain available as a complementary
+        signal.  It is computed once while loading a sample and reused at every
+        PTv3 stage.
+        """
+        if getattr(self, "points_workspace", None) is None:
+            return np.ones((height, width), dtype=bool)
+        bounds = np.asarray(
+            [
+                self.points_workspace["X_BBOX"],
+                self.points_workspace["Y_BBOX"],
+                self.points_workspace["Z_BBOX"],
+            ],
+            dtype=np.float64,
+        )
+        if bounds.shape != (3, 2) or not np.isfinite(bounds).all() or np.any(bounds[:, 0] >= bounds[:, 1]):
+            raise ValueError("points_workspace must contain finite increasing X/Y/Z_BBOX bounds")
+
+        rows, cols = np.meshgrid(
+            np.arange(height, dtype=np.float64),
+            np.arange(width, dtype=np.float64),
+            indexing="ij",
+        )
+        directions_camera = np.stack(
+            (
+                (cols - K[0, 2]) / K[0, 0],
+                (rows - K[1, 2]) / K[1, 1],
+                np.ones_like(rows),
+            ),
+            axis=-1,
+        )
+        world_from_camera = np.linalg.inv(camera_from_world.astype(np.float64))
+        origin = world_from_camera[:3, 3]
+        directions = directions_camera @ world_from_camera[:3, :3].T
+
+        # Slab ray/AABB test with an explicit parallel-axis case.
+        parallel = np.abs(directions) < 1e-12
+        parallel_outside = parallel & (
+            (origin[None, None, :] < bounds[:, 0])
+            | (origin[None, None, :] > bounds[:, 1])
+        )
+        safe_directions = np.where(parallel, 1.0, directions)
+        t0 = (bounds[:, 0] - origin) / safe_directions
+        t1 = (bounds[:, 1] - origin) / safe_directions
+        near = np.where(parallel, -np.inf, np.minimum(t0, t1)).max(axis=-1)
+        far = np.where(parallel, np.inf, np.maximum(t0, t1)).min(axis=-1)
+        mask = (~parallel_outside.any(axis=-1)) & (far >= np.maximum(near, 0.0))
+        if not mask.any():
+            raise ValueError("The configured 3D points_workspace does not intersect this camera image")
+        return mask
+
     def _load_sfp_inputs(self, ep_idx: int, frame_idx: int, dense_polar: np.ndarray) -> dict:
         value = self._read_sidecar(self.sfp_input_dir, ep_idx, frame_idx)
         source = io.BytesIO(value) if isinstance(value, bytes) else value
@@ -328,13 +389,21 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError("SfP I_un contains non-finite values")
         rays = self._viewing_directions(K, *i_un.shape)
         polar_images = np.concatenate((i_un[None], dense_polar[:3], rays), axis=0)
+        workspace_mask = (
+            np.ones(i_un.shape, dtype=bool)
+            if self.use_point_image_support
+            else self._workspace_ray_mask(K, camera_from_world, *i_un.shape)
+        )
         result = {
             "polar_images": torch.from_numpy(polar_images[None].copy()),
             "polar_K": torch.from_numpy(K[None].copy()),
             "T_camera_from_world": torch.from_numpy(camera_from_world[None].copy()),
             "view_valid": torch.ones(1, dtype=torch.bool),
             "pixel_valid": torch.from_numpy((dense_polar[3:4] > 0.5).copy()),
+            "polar_workspace_mask": torch.from_numpy(workspace_mask[None].copy()),
         }
+        if self.use_point_image_support:
+            result["point_pixel_image_hw"] = torch.tensor([i_un.shape], dtype=torch.long)
         if prior is not None:
             if prior.shape != (11, *i_un.shape):
                 raise ValueError(f"CGA physical_prior must be [11,H,W], got {prior.shape}")
@@ -440,21 +509,49 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             )
             item["target_points"] = torch.from_numpy(target_points)
             point_cloud = np.column_stack((point_cloud, target_mask)).astype(np.float32)
-        if self.use_polar_material_conditioning:
+        if self.use_polar_material_conditioning or self.use_point_image_support:
+            pixel_dir = self.point_pixel_dir or self.depth_point_pixel_dir
             point_pixels = (
                 depth_point_pixels
-                if depth_point_pixels is not None and self.point_pixel_dir == self.depth_point_pixel_dir
-                else self._load_point_pixels(ep_idx, frame_idx).reshape(-1)
+                if depth_point_pixels is not None and pixel_dir == self.depth_point_pixel_dir
+                else self._load_point_pixels(ep_idx, frame_idx, pixel_dir).reshape(-1)
             )
             if len(point_pixels) != len(point_cloud):
                 raise ValueError("Point pixels and point cloud have different row counts")
+            if self.use_point_image_support:
+                if depth_point_pixels is not None and not np.array_equal(point_pixels, depth_point_pixels):
+                    raise ValueError("BBox support and sparse-depth targets must use identical current pixel IDs")
+                height, width = item["point_pixel_image_hw"][0].tolist()
+                if np.any((point_pixels < 0) | (point_pixels >= height * width)):
+                    raise ValueError("Current-observation pixel indices are outside the polar image")
+                if np.any(point_pixels > 2 ** 24):
+                    raise ValueError("Pixel IDs exceed exact float32 precision for row-preserving augmentation")
             point_cloud = np.column_stack((point_cloud, point_pixels)).astype(np.float32)
         point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
+        if self.use_point_image_support and len(point_cloud) == 0:
+            raise ValueError("Image-support fusion requires nonempty points after workspace filtering")
+        if self.use_point_image_support and "polar_workspace_mask" in item:
+            # An RLBench camera may itself lie inside the broad 3D AABB, making
+            # ray/AABB intersection cover the whole image.  The envelope of all
+            # pre-subsampling points that survived the workspace filter gives a
+            # useful 2D crop while retaining every missing-depth/polar pixel in it.
+            height, width = item["polar_workspace_mask"].shape[-2:]
+            pixels = point_cloud[:, -1].astype(np.int64)
+            rows, cols = pixels // width, pixels % width
+            workspace_mask = torch.zeros_like(item["polar_workspace_mask"])
+            workspace_mask[
+                0,
+                int(rows.min()):int(rows.max()) + 1,
+                int(cols.min()):int(cols.max()) + 1,
+            ] = True
+            item["polar_workspace_mask"] = workspace_mask
         point_cloud = self.augment_point_cloud(point_cloud, item)
         point_cloud = self.center_point_cloud(point_cloud, item)
-        if self.use_polar_material_conditioning:
+        if self.use_polar_material_conditioning or self.use_point_image_support:
             item["point_pixel_indices"] = torch.from_numpy(point_cloud[:, -1].astype(np.int64))
             point_cloud = np.ascontiguousarray(point_cloud[:, :-1])
+            if len(item["point_pixel_indices"]) != len(point_cloud):
+                raise ValueError("Pixel correspondence was lost during point row processing")
         if self.target_reconstruction_dir is not None:
             item["target_input_mask"] = torch.from_numpy(point_cloud[:, -1].copy())
             point_cloud = np.ascontiguousarray(point_cloud[:, :-1])
@@ -545,6 +642,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             np.eye(4, dtype=np.float32) if "polar_images" in item else None
         )
         max_npoints = min(int(len(point_cloud) * np.random.uniform(0.8, 1.0)), self.max_npoints)
+        if self.use_point_image_support:
+            if self.max_npoints <= 0:
+                raise ValueError("Image-support fusion requires max_npoints > 0")
+            max_npoints = max(1, max_npoints)
         if len(point_cloud) > max_npoints:
             ridxs = np.random.choice(len(point_cloud), max_npoints, replace=False)
             point_cloud = point_cloud[ridxs]
@@ -633,6 +734,10 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         ordered_keys = self.select_feature_keys + [OBS_POINTS, "task", f"{OBS_POINTS}.center"] + self.select_action_is_pad_keys
         if self.use_polar_material_conditioning:
             ordered_keys += ["material_rgb", "polar_dense", "material_candidates", "point_pixel_indices"]
+        elif self.use_point_image_support:
+            ordered_keys += ["point_pixel_indices"]
+        if self.use_point_image_support:
+            ordered_keys += ["point_pixel_image_hw"]
         if self.target_reconstruction_dir is not None:
             ordered_keys += ["target_points", "target_input_mask"]
         if "polar_images" in item:
@@ -640,6 +745,7 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
                 "polar_images", "polar_rgb", "polar_physical_prior", "polar_K",
                 "T_camera_from_model", "T_model_from_world",
                 "view_valid", "pixel_valid", "polar_pixel_transform",
+                "polar_workspace_mask",
             ]
         if "observed_depth" in item:
             ordered_keys += ["observed_depth", "observed_depth_valid"]

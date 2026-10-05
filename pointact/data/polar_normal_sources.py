@@ -75,6 +75,8 @@ def _grayscale(analyzers: np.ndarray) -> np.ndarray:
 def viewing_directions(height: int, width: int, camera_k: np.ndarray | None = None) -> np.ndarray:
     """Build unit camera rays in ``+x right, +y down, +z forward`` coordinates."""
     yy, xx = np.mgrid[:height, :width].astype(np.float32)
+    xx += 0.5
+    yy += 0.5
     if camera_k is None:
         x = (xx - 0.5 * width) / max(0.5 * width, 1.0)
         y = (yy - 0.5 * height) / max(0.5 * height, 1.0)
@@ -86,6 +88,54 @@ def viewing_directions(height: int, width: int, camera_k: np.ndarray | None = No
         y = (yy - camera_k[1, 2]) / camera_k[1, 1]
     rays = np.stack((x, y, np.ones_like(x)), axis=-1)
     return rays / np.maximum(np.linalg.norm(rays, axis=-1, keepdims=True), 1e-8)
+
+
+def normals_from_depth(
+    depth: np.ndarray,
+    camera_k: np.ndarray,
+    *,
+    depth_scale: float = 1.0,
+    relative_edge_threshold: float = 0.05,
+    absolute_edge_threshold: float = 0.01,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert clean pinhole z-depth to face-forward camera-space normals.
+
+    A centered finite difference is used only where all four neighbors contain
+    valid depth and do not cross a large depth discontinuity.  This is intended
+    for independent rendered/laser GT depth, not noisy observed sensor depth.
+    """
+    depth = np.asarray(depth, dtype=np.float32) * float(depth_scale)
+    if depth.ndim != 2:
+        raise ValueError(f"depth must be HW, got {depth.shape}")
+    if depth_scale <= 0.0:
+        raise ValueError("depth_scale must be positive")
+    if relative_edge_threshold < 0.0 or absolute_edge_threshold < 0.0:
+        raise ValueError("depth edge thresholds must be non-negative")
+    rays = viewing_directions(*depth.shape, camera_k)
+    points = rays * (depth / np.maximum(rays[..., 2], 1e-8))[..., None]
+    normal = np.zeros((*depth.shape, 3), dtype=np.float32)
+    tangent_x = points[1:-1, 2:] - points[1:-1, :-2]
+    tangent_y = points[2:, 1:-1] - points[:-2, 1:-1]
+    normal[1:-1, 1:-1] = np.cross(tangent_x, tangent_y)
+
+    finite_positive = np.isfinite(depth) & (depth > 0.0)
+    center = depth[1:-1, 1:-1]
+    neighbors = np.stack(
+        (depth[1:-1, :-2], depth[1:-1, 2:], depth[:-2, 1:-1], depth[2:, 1:-1]),
+        axis=0,
+    )
+    threshold = np.maximum(absolute_edge_threshold, relative_edge_threshold * center)
+    interior_valid = (
+        finite_positive[1:-1, 1:-1]
+        & finite_positive[1:-1, :-2]
+        & finite_positive[1:-1, 2:]
+        & finite_positive[:-2, 1:-1]
+        & finite_positive[2:, 1:-1]
+        & (np.max(np.abs(neighbors - center[None]), axis=0) <= threshold)
+    )
+    valid = np.zeros_like(finite_positive)
+    valid[1:-1, 1:-1] = interior_valid
+    return face_forward_normals(normal, rays, valid)
 
 
 def polarization_observation(analyzers: np.ndarray) -> dict[str, np.ndarray]:
@@ -222,11 +272,20 @@ def build_cga_record(
     *,
     camera_k: np.ndarray | None = None,
     refractive_index: float = 1.5,
+    normal_orientation: str = "ray",
 ) -> dict[str, np.ndarray]:
     """Build one packed native-CGA record from aligned raw arrays."""
+    if normal_orientation not in ("ray", "optical_axis"):
+        raise ValueError("normal_orientation must be 'ray' or 'optical_axis'")
     height, width = analyzers.shape[1:3]
     viewing = viewing_directions(height, width, camera_k)
-    normal_gt, normal_valid_mask = face_forward_normals(normal_gt, viewing, normal_valid_mask)
+    orientation = viewing
+    if normal_orientation == "optical_axis":
+        viewing = np.broadcast_to(
+            np.asarray([0.0, 0.0, 1.0], dtype=np.float32), (height, width, 3)
+        ).copy()
+        orientation = viewing
+    normal_gt, normal_valid_mask = face_forward_normals(normal_gt, orientation, normal_valid_mask)
     observation = polarization_observation(analyzers)
     candidates = ambiguous_normals(
         observation["DoP"][0], observation["AoLP"], refractive_index=refractive_index

@@ -27,6 +27,7 @@ from packaging import version
 from huggingface_hub import hf_hub_download, PyTorchModelHubMixin
 from addict import Dict
 import torch
+from pointact.model.vla_pointact.action_head_3d.polar_bbox_fusion import inherit_image_support
 import torch.nn as nn
 from torch.nn.init import trunc_normal_
 import spconv.pytorch as spconv
@@ -536,6 +537,7 @@ class GridPooling(PointModule):
             grid_coord=grid_coord,
             batch=point.batch[head_indices],
         )
+        inherit_image_support(point, point_dict, cluster, indices, idx_ptr)
         if "origin_coord" in point.keys():
             point_dict["origin_coord"] = torch_scatter.segment_csr(
                 point.origin_coord[indices], idx_ptr, reduce="mean"

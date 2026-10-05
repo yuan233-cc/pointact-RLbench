@@ -24,6 +24,7 @@ Please cite our work if the code is helpful to you.
 from huggingface_hub import PyTorchModelHubMixin
 from addict import Dict
 import torch
+from pointact.model.vla_pointact.action_head_3d.polar_bbox_fusion import inherit_image_support
 import torch.nn as nn
 from torch.nn.init import trunc_normal_
 import spconv.pytorch as spconv
@@ -448,6 +449,7 @@ class GridPooling(PointModule):
             grid_coord=grid_coord,
             batch=point.batch[head_indices],
         )
+        inherit_image_support(point, point_dict, cluster, indices, idx_ptr)
         if "origin_coord" in point.keys():
             point_dict["origin_coord"] = torch_scatter.segment_csr(
                 point.origin_coord[indices], idx_ptr, reduce="mean"
@@ -471,11 +473,15 @@ class GridPooling(PointModule):
             "T_model_from_world",
             "view_valid",
             "pixel_valid",
+            "polar_workspace_mask",
             "polar_image_hw",
             "polar_pixel_transform",
             "polar_feature_strides",
             "polar_feature_offsets",
             "polar_route_stats",
+            "polar_bbox_feature_bank",
+            "polar_bbox_bank_strides",
+            "polar_bbox_bank_offsets",
         ):
             if key in point.keys():
                 point_dict[key] = point[key]

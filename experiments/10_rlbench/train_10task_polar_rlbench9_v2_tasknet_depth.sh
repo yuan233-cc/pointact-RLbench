@@ -56,6 +56,8 @@ fi
 # retained for 3D routing and depth reconstruction.
 data_path="${DATA_PATH:-experiments/10_rlbench/data_configs/data-10task-polar-rlbench9-v2-incomplete-sfp-wild-proxy.yaml}"
 output_dir="${OUTPUT_DIR:-$repo_root/checkpoints/rlbench/pointact-rlbench9-v2-tasknet-depth}"
+read -r -a bbox_expansion <<< "${POLAR_BBOX_EXPANSION:-1.0 1.0 1.0 1.0 1.0}"
+read -r -a bbox_feature_levels <<< "${POLAR_BBOX_FEATURE_LEVELS:-0 0 1 2 2}"
 
 accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --model_class VLAEncDec3DWithActionRegressionModel \
@@ -99,6 +101,10 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --polar_neighbor_radius "${POLAR_NEIGHBOR_RADIUS:-1}" \
     --polar_max_tokens_per_group "${POLAR_MAX_TOKENS_PER_GROUP:-32}" \
     --polar_token_mode "${POLAR_TOKEN_MODE:-local}" \
+    --polar_fusion_mode "${POLAR_FUSION_MODE:-projection}" \
+    --polar_bbox_grid_size "${POLAR_BBOX_GRID_SIZE:-4}" \
+    --polar_bbox_expansion "${bbox_expansion[@]}" \
+    --polar_bbox_feature_levels "${bbox_feature_levels[@]}" \
     --polar_max_views 1 --polar_writeback False \
     --use_polar_depth_self_supervision True \
     --polar_depth_loss_weight "${POLAR_DEPTH_LOSS_WEIGHT:-0.1}" \

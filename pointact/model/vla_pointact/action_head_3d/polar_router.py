@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,6 +129,7 @@ class PolarTokenRouter:
         max_tokens: int = 32,
         z_epsilon: float = 1e-6,
         mode: str = "local",
+        cache_routes: bool | None = None,
     ):
         if neighbor_radius < 0 or max_tokens <= 0:
             raise ValueError("neighbor_radius must be >=0 and max_tokens must be >0")
@@ -137,6 +140,34 @@ class PolarTokenRouter:
         self.max_tokens = max_tokens
         self.z_epsilon = z_epsilon
         self.mode = mode
+        # Experimental, exact within-step reuse. Off by default so existing
+        # training and checkpoints retain their original execution path.
+        self.cache_routes = (
+            os.environ.get("POINTACT_POLAR_ROUTE_CACHE", "0") == "1"
+            if cache_routes is None else cache_routes
+        )
+
+    def _cache_key(self, point, order: Tensor, group_lengths: Tensor):
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(order.detach().cpu().contiguous().numpy().tobytes())
+        digest.update(group_lengths.detach().cpu().contiguous().numpy().tobytes())
+
+        def identity(value):
+            if value is None:
+                return None
+            return value.data_ptr(), value._version, tuple(value.shape)
+
+        return (
+            self.level, self.neighbor_radius, self.max_tokens,
+            self.z_epsilon, self.mode,
+            (tuple(order.shape), order.dtype, tuple(group_lengths.shape), group_lengths.dtype),
+            digest.digest(),
+            *(identity(point.get(name)) for name in (
+                "coord", "batch", "polar_features", "polar_K",
+                "T_camera_from_model", "view_valid", "polar_image_hw",
+                "pixel_valid", "polar_pixel_transform",
+            )),
+        )
 
     @staticmethod
     def _route_from_keys(features: Tensor, sample: int, keys: Tensor) -> PolarRoute:
@@ -214,6 +245,17 @@ class PolarTokenRouter:
             raise ValueError("T_camera_from_model shape does not match the feature bank")
         if point.view_valid.shape != (batch_size, num_views):
             raise ValueError("view_valid shape does not match the feature bank")
+
+        route_cache = None
+        cache_key = None
+        if self.cache_routes:
+            route_cache = point.setdefault("_polar_route_cache", {})
+            cache_key = self._cache_key(point, order, group_lengths)
+            cached = route_cache.get(cache_key)
+            if cached is not None:
+                routes, stats = cached
+                point.setdefault("polar_route_stats", []).append(dict(stats))
+                return routes
 
         transforms = point.T_camera_from_model.float()
         intrinsics = point.polar_K.float()
@@ -311,6 +353,8 @@ class PolarTokenRouter:
             "truncated": max(total_candidates - total_selected, 0),
         }
         point.setdefault("polar_route_stats", []).append(stats)
+        if route_cache is not None:
+            route_cache[cache_key] = (routes, dict(stats))
         return routes
 
 

@@ -6,15 +6,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import partial
 from pathlib import Path
 
 import torch
 import yaml
-from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler, default_collate
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pointact.data.polar_normal_dataset import PolarNormalDataset, assert_disjoint_groups  # noqa: E402
+from pointact.data.rlbench_polar_normal_lmdb import RLBenchPolarNormalLmdbDataset  # noqa: E402
 from pointact.model.vla_pointact.action_head_3d.cga_dino_normal import (
     CgaDinoNormalNet,
     masked_cosine_normal_loss,
@@ -44,9 +46,20 @@ def build_model(config: dict) -> CgaDinoNormalNet:
 
 def build_dataset(
     config: dict, split: str, dataset_config: dict | None = None
-) -> PolarNormalDataset:
+) -> PolarNormalDataset | RLBenchPolarNormalLmdbDataset:
     data = config["data"]
     source = data if dataset_config is None else {**data, **dataset_config}
+    if source.get("format") == "rlbench_polar_lmdb":
+        return RLBenchPolarNormalLmdbDataset(
+            source[f"{split}_manifest"],
+            dataset_root=source["dataset_root"],
+            image_size=source.get("image_size", 256),
+            require_rgb=config["model"].get("use_dino", True),
+            refractive_index=source.get("refractive_index", 1.5),
+            input_mode=source.get("input_mode", "robot"),
+            ray_dropout_prob=source.get(f"ray_dropout_{split}", 0.0),
+            limit=source.get("overfit_samples"),
+        )
     return PolarNormalDataset(
         source[f"{split}_manifest"],
         input_mode=source["input_mode"],
@@ -56,6 +69,7 @@ def build_dataset(
         normal_gt_source=source["normal_gt_source"],
         normal_transform=source.get("normal_transform"),
         normal_sign=source.get("normal_sign", 1.0),
+        ray_dropout_prob=source.get(f"ray_dropout_{split}", 0.0),
         limit=source.get("overfit_samples"),
     )
 
@@ -99,6 +113,18 @@ def aggregate_metrics(total: dict[str, float]) -> dict[str, float]:
         "within_22_5": total["within_22_5"] / count,
         "valid_pixels": total["valid_count"],
     }
+
+
+def collate_training_fields(samples: list[dict], *, use_rgb: bool) -> dict:
+    """Batch only fields shared by all normal datasets and consumed by the model."""
+    required = ("polar_observation", "physical_prior", "normal_gt", "normal_valid_mask")
+    batch = default_collate([{key: sample[key] for key in required} for sample in samples])
+    if use_rgb:
+        batch["rgb"] = default_collate([sample["rgb"] for sample in samples])
+    else:
+        _, height, width = batch["polar_observation"].shape[1:]
+        batch["rgb"] = torch.empty(len(samples), 0, height, width)
+    return batch
 
 
 @torch.no_grad()
@@ -167,9 +193,11 @@ def main() -> None:
         if len(train_datasets) > 1
         else None
     )
+    collate = partial(collate_training_fields, use_rgb=config["model"].get("use_dino", True))
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=sampler is None, sampler=sampler,
         num_workers=train_cfg.get("num_workers", 4), pin_memory=device.type == "cuda",
+        collate_fn=collate,
     )
     val_loaders = {
         name: DataLoader(
@@ -178,6 +206,7 @@ def main() -> None:
             shuffle=False,
             num_workers=train_cfg.get("num_workers", 4),
             pin_memory=device.type == "cuda",
+            collate_fn=collate,
         )
         for name, dataset in named_val
     }

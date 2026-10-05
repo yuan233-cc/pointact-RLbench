@@ -108,10 +108,16 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
                 polarapp_allow_random_init=training_args.polarapp_allow_random_init,
                 polarapp_pyramid_channels=training_args.polarapp_pyramid_channels,
                 polarapp_input_mode=training_args.polarapp_input_mode,
+                polarapp_input_size=training_args.polarapp_input_size,
                 polar_neighbor_radius=training_args.polar_neighbor_radius,
                 polar_max_tokens_per_group=training_args.polar_max_tokens_per_group,
                 polar_max_views=training_args.polar_max_views,
                 polar_token_mode=training_args.polar_token_mode,
+                polar_fusion_mode=training_args.polar_fusion_mode,
+                polar_bbox_grid_size=training_args.polar_bbox_grid_size,
+                polar_bbox_expansion=training_args.polar_bbox_expansion,
+                polar_bbox_feature_levels=training_args.polar_bbox_feature_levels,
+                polar_workspace_attend_action=training_args.polar_workspace_attend_action,
             )
         if training_args.use_polar_material_conditioning:
             overrides["use_polar_material_conditioning"] = True

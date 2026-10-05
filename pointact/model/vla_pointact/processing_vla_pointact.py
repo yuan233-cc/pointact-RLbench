@@ -14,6 +14,7 @@ from transformers.video_utils import VideoInput
 
 from pointact.constants import DEFAULT_STATE_TOKEN, STATE_END_TOKEN, STATE_START_TOKEN
 from pointact.data.polar_material import polar_vlm_image
+from pointact.data.transforms.pointcloud import normalize_polar_like_rgb
 from pointact.model.backbone.processor_base import RobotPointProcessorBase
 from pointact.utils.rotation import convert_rotation
 from pointact.utils.torch_utils import pad_vector
@@ -84,7 +85,7 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
 
     @torch.no_grad
     def _prepare_robot_inputs(self, batch: dict, points_workspace: dict=None, remove_arm: bool=False,
-                              point_indices_out: list | None = None):
+                              point_indices_out: list | None = None, use_image_support: bool = False):
         """Prepare model inputs from raw robot batch"""
         batch_messages = []
         batch_states = []
@@ -144,8 +145,13 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                 )
             else:
                 if "observation.points" not in mini_batch or "point_pixel_indices" not in mini_batch:
-                    raise ValueError("Material conditioning needs precomputed observation.points and point_pixel_indices")
-                point_pixels = np.asarray(mini_batch["point_pixel_indices"], dtype=np.int32).reshape(-1)
+                    raise ValueError("Point image support needs precomputed observation.points and current point_pixel_indices")
+                raw_pixels = mini_batch["point_pixel_indices"]
+                if isinstance(raw_pixels, torch.Tensor):
+                    raw_pixels = raw_pixels.detach().cpu().numpy()
+                point_pixels = np.asarray(raw_pixels)
+                if point_pixels.ndim != 1 or not np.issubdtype(point_pixels.dtype, np.integer):
+                    raise ValueError("Current point_pixel_indices must be a one-dimensional integer array")
                 cloud = self._as_numpy_point_cloud(mini_batch["observation.points"])
                 if len(cloud) != len(point_pixels):
                     raise ValueError("Point cloud and point pixel indices have different lengths")
@@ -158,6 +164,24 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                     conditioned_cloud, self.robot_config["max_npoints"][repo_id])
                 point_indices_out.append(torch.as_tensor(conditioned_cloud[:, -1].copy(), dtype=torch.long))
                 point_cloud = np.ascontiguousarray(conditioned_cloud[:, :-1])
+                if use_image_support:
+                    if len(point_cloud) == 0:
+                        raise ValueError("BBox inference cannot serialize an empty point cloud after filtering")
+                    # This row-preserving route deliberately does not voxelize.
+                    # Match the dataset's raw XYZRGB+polar channel selection.
+                    mode = self.robot_config.get("point_feature_mode", {}).get(repo_id, "xyzrgb")
+                    if mode == "xyzrgb":
+                        point_cloud = np.ascontiguousarray(point_cloud[:, :6])
+                    elif mode in ("xyzrgb_polar", "xyz_polar"):
+                        if point_cloud.shape[1] != 9:
+                            raise ValueError("BBox polar inference expects raw Nx9 XYZRGB+polar observation.points")
+                        if mode == "xyz_polar":
+                            point_cloud = np.ascontiguousarray(np.column_stack((point_cloud[:, :3], point_cloud[:, 6:9])))
+                        polar_slice = slice(3, 6) if mode == "xyz_polar" else slice(6, 9)
+                        if self.robot_config.get("polar_feature_normalization", {}).get(repo_id, "raw") == "rgb":
+                            point_cloud[:, polar_slice] = normalize_polar_like_rgb(point_cloud[:, polar_slice])
+                    else:
+                        raise ValueError(f"Unsupported point_feature_mode={mode!r}")
             point_cloud = torch.from_numpy(point_cloud).float()
             point_cloud, state, point_center = self._center_point_cloud_and_state(
                 point_cloud,
@@ -209,10 +233,12 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         points_workspace: dict=None, remove_arm: bool=False, **kwargs
     ):
         conditioned = bool(model.config.use_polar_material_conditioning)
-        point_indices = [] if conditioned else None
+        support_fusion = getattr(model.config, "polar_fusion_mode", "projection") in ("bbox", "workspace")
+        point_indices = [] if conditioned or support_fusion else None
         batch_messages, batch_states, batch_points, batch_point_centers, repo_ids = self._prepare_robot_inputs(
             batch, points_workspace=points_workspace, remove_arm=remove_arm,
             point_indices_out=point_indices,
+            use_image_support=support_fusion,
         )
         device = model.device
 
@@ -230,6 +256,8 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
         inputs["points"] = torch.cat(batch_points, 0).to(device)
         inputs["npoints_in_batch"] = torch.LongTensor([len(x) for x in batch_points]).to(device)
         inputs["attention_mask"] = inputs["attention_mask"].bool().to(device)
+        if point_indices is not None:
+            inputs["point_pixel_indices"] = torch.cat(point_indices).to(device)
         if getattr(model.config, "polar_enabled", False):
             required = ("polar_images", "polar_K", "view_valid")
             missing = [key for key in required if key not in batch]
@@ -257,9 +285,26 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                     "Polar inference requires T_camera_from_world or an already centered "
                     "T_camera_from_model; calibration is never replaced with identity"
                 )
-            for key in ("pixel_valid", "polar_pixel_transform"):
+            for key in ("pixel_valid", "polar_workspace_mask", "polar_pixel_transform", "point_pixel_image_hw"):
                 if key in batch:
                     inputs[key] = torch.as_tensor(batch[key]).to(device)
+            if (
+                getattr(model.config, "polar_fusion_mode", "projection") == "workspace"
+                and "polar_workspace_mask" not in inputs
+            ):
+                height, width = inputs["polar_images"].shape[-2:]
+                masks = []
+                for pixels in point_indices:
+                    rows = pixels.div(width, rounding_mode="floor")
+                    cols = pixels.remainder(width)
+                    mask = torch.zeros((1, height, width), dtype=torch.bool)
+                    mask[
+                        0,
+                        int(rows.min()):int(rows.max()) + 1,
+                        int(cols.min()):int(cols.max()) + 1,
+                    ] = True
+                    masks.append(mask)
+                inputs["polar_workspace_mask"] = torch.stack(masks).to(device)
         if conditioned:
             rgb_images, dense_polar, candidates = [], [], []
             for index, repo_id in enumerate(repo_ids):
@@ -280,7 +325,6 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                 candidates.append(torch.as_tensor(candidate, dtype=torch.float32))
             inputs["material_rgb"] = torch.stack(rgb_images).to(device)
             inputs["polar_dense"] = torch.stack(dense_polar).to(device)
-            inputs["point_pixel_indices"] = torch.cat(point_indices).to(device)
             max_count = max(len(candidate) for candidate in candidates)
             material_values = torch.zeros(len(candidates), max_count, candidates[0].shape[-1])
             material_mask = torch.zeros(len(candidates), max_count, dtype=torch.bool)

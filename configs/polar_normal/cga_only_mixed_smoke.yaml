@@ -1,0 +1,42 @@
+data:
+  input_mode: native_cga
+  image_size: 64
+  require_calibration: true
+  overfit_samples: 2
+  datasets:
+    - name: hammer
+      ray_dropout_train: 0.15
+      train_manifest: robot_data/polar_normal_smoke/hammer_8seq_2frames_stride4_axis_v3/train_manifest.json
+      val_manifest: robot_data/polar_normal_smoke/hammer_8seq_2frames_stride4_axis_v3/val_manifest.json
+      normal_gt_source: HAMMER clean polarization-camera GT depth normals
+    - name: sfpuel
+      ray_dropout_train: 1.0
+      ray_dropout_val: 1.0
+      train_manifest: robot_data/polar_normal_smoke/sfpuel_groups_00001_00008_stride4_axis_v3/train_manifest.json
+      val_manifest: robot_data/polar_normal_smoke/sfpuel_groups_00001_00008_stride4_axis_v3/val_manifest.json
+      normal_gt_source: SfPUEL public surface-normal GT
+    - name: rlbench_polar_v2
+      format: rlbench_polar_lmdb
+      input_mode: native_cga
+      ray_dropout_train: 0.15
+      dataset_root: robot_data/rlbench/lerobot_point_lmdb/hybridvla_10tasks_train_keysteps_polar_rlbench9_v2
+      train_manifest: robot_data/polar_normal_rlbench_v2_manifests/train.jsonl
+      val_manifest: robot_data/polar_normal_rlbench_v2_manifests/val.jsonl
+      normal_gt_source: archived Coppelia depth + same-object mask finite-difference normals
+
+model:
+  use_dino: false
+  transformer_blocks: 1
+  transformer_dropout: 0.0
+
+training:
+  output_dir: outputs/cga_only_mixed_smoke_ray_dropout_v1
+  seed: 7
+  device: cpu
+  epochs: 1
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  num_workers: 0
+  learning_rate: 1.0e-4
+  step_size: 10
+  gamma: 0.5

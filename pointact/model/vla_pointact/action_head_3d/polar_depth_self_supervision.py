@@ -12,6 +12,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from .polar_router import routed_feature_geometry
+from .polar_bbox_fusion import (
+    mask_points_at_pixel_targets, rasterize_inherited_point_features,
+)
 
 
 class _ConvBlock(nn.Module):
@@ -44,8 +47,12 @@ def rasterize_fused_point_features(
     pixel_transform: Tensor | None = None,
     feature_strides: tuple[float, ...] | None = None,
     feature_offsets: tuple[float, ...] | None = None,
+    correspondence_mode: str = "projection",
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
-    """Project each PointACT encoder stage onto its matching polar feature grid.
+    """Rasterize each PointACT stage onto its matching polar feature grid.
+
+    Bbox mode uses input pixel support and exact pooling lineage, without
+    projecting pooled XYZ. Projection mode is the legacy ablation path.
 
     Colliding point features are averaged. Projection indices are discrete, but
     the scatter operation remains differentiable with respect to point features,
@@ -55,6 +62,14 @@ def rasterize_fused_point_features(
     """
     if len(stage_points) != len(feature_levels):
         raise ValueError("stage_points and feature_levels must have the same length")
+    if correspondence_mode in ("bbox", "workspace"):
+        if feature_strides is None or feature_offsets is None:
+            raise ValueError("Inherited depth rasterization requires feature grid geometry")
+        return rasterize_inherited_point_features(
+            stage_points, feature_levels, feature_strides, feature_offsets
+        )
+    if correspondence_mode != "projection":
+        raise ValueError(f"Unknown correspondence mode: {correspondence_mode}")
     if intrinsics.ndim != 4 or intrinsics.shape[-2:] != (3, 3):
         raise ValueError("intrinsics must be [B,V,3,3]")
     batch, views = intrinsics.shape[:2]
@@ -141,8 +156,10 @@ def mask_points_at_depth_targets(
     transforms: Tensor,
     view_valid: Tensor,
     pixel_transform: Tensor | None = None,
+    point_pixel_indices: Tensor | None = None,
+    point_pixel_image_hw: Tensor | None = None,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Remove input points whose projections are reserved as depth targets.
+    """Remove points at held-out pixels using saved IDs, or legacy projection.
 
     RLBench V2 serializes ``point_pixel_indices`` with ``floor(uv)``.  Use the
     same raster-cell convention here so a held-out sparse-depth pixel cannot
@@ -165,6 +182,12 @@ def mask_points_at_depth_targets(
         raise ValueError("view_valid must be [B,V]")
     if pixel_transform is not None and pixel_transform.shape != (batch, views, 3, 3):
         raise ValueError("pixel_transform must be [B,V,3,3]")
+
+    if point_pixel_indices is not None:
+        return mask_points_at_pixel_targets(
+            points, npoints_in_batch, point_pixel_indices, target_mask,
+            pixel_transform, point_pixel_image_hw,
+        )
 
     batch_ids = torch.arange(batch, device=points.device).repeat_interleave(
         npoints_in_batch.long()
@@ -214,6 +237,7 @@ class PolarPointDepthDecoder(nn.Module):
         point_feature_channels: tuple[int, ...] = (32, 64, 128, 256, 512),
         min_depth: float = 0.05,
         max_depth: float = 4.5,
+        use_polar_features: bool = True,
     ):
         super().__init__()
         if len(feature_channels) != 5 or len(point_feature_channels) != 5:
@@ -222,6 +246,7 @@ class PolarPointDepthDecoder(nn.Module):
             raise ValueError("Expected 0 < min_depth < max_depth")
         self.min_depth = float(min_depth)
         self.max_depth = float(max_depth)
+        self.use_polar_features = bool(use_polar_features)
 
         point_widths = (32, 32, 64, 64, 64)
         self.point_projections = nn.ModuleList(
@@ -230,11 +255,13 @@ class PolarPointDepthDecoder(nn.Module):
         )
 
         c1, c2, c3, c4, c5 = feature_channels
-        self.fuse5 = _ConvBlock(c5 + 64 + 1, 256)
-        self.fuse4 = _ConvBlock(256 + c4 + 64 + 1, 256)
-        self.fuse3 = _ConvBlock(256 + c3 + 64 + 1, 128)
-        self.fuse2 = _ConvBlock(128 + c2 + 32 + 1, 64)
-        self.fuse1 = _ConvBlock(64 + c1 + 32 + 1, 32)
+        polar_widths = (c1, c2, c3, c4, c5) if self.use_polar_features else (0, 0, 0, 0, 0)
+        q1, q2, q3, q4, q5 = polar_widths
+        self.fuse5 = _ConvBlock(q5 + 64 + 1, 256)
+        self.fuse4 = _ConvBlock(256 + q4 + 64 + 1, 256)
+        self.fuse3 = _ConvBlock(256 + q3 + 64 + 1, 128)
+        self.fuse2 = _ConvBlock(128 + q2 + 32 + 1, 64)
+        self.fuse1 = _ConvBlock(64 + q1 + 32 + 1, 32)
         self.depth_head = nn.Conv2d(32, 1, kernel_size=1)
 
     @staticmethod
@@ -245,15 +272,20 @@ class PolarPointDepthDecoder(nn.Module):
 
     def forward(
         self,
-        feature_levels: tuple[Tensor, ...],
+        feature_levels: tuple[Tensor, ...] | None,
         point_feature_levels: tuple[Tensor, ...],
         point_valid_levels: tuple[Tensor, ...],
         output_size: tuple[int, int] | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return dense metric depth and the final dense completion feature."""
-        if not (len(feature_levels) == len(point_feature_levels) == len(point_valid_levels) == 5):
-            raise ValueError("All inputs must contain five feature levels")
-        x1, x2, x3, x4, x5 = feature_levels
+        if not (len(point_feature_levels) == len(point_valid_levels) == 5):
+            raise ValueError("Point inputs must contain five feature levels")
+        if self.use_polar_features:
+            if feature_levels is None or len(feature_levels) != 5:
+                raise ValueError("Polar-enabled decoder requires five feature levels")
+            x1, x2, x3, x4, x5 = feature_levels
+        elif feature_levels is not None:
+            raise ValueError("Point-only decoder must receive feature_levels=None")
         point_levels = tuple(
             projection(points * valid.to(points.dtype))
             for projection, points, valid in zip(
@@ -261,17 +293,20 @@ class PolarPointDepthDecoder(nn.Module):
             )
         )
         p1, p2, p3, p4, p5 = point_levels
-        m1, m2, m3, m4, m5 = (mask.to(x1.dtype) for mask in point_valid_levels)
+        m1, m2, m3, m4, m5 = (mask.to(p1.dtype) for mask in point_valid_levels)
 
-        decoded = self.fuse5(torch.cat((x5, p5, m5), dim=1))
-        decoded = self._up_to(decoded, x4)
-        decoded = self.fuse4(torch.cat((decoded, x4, p4, m4), dim=1))
-        decoded = self._up_to(decoded, x3)
-        decoded = self.fuse3(torch.cat((decoded, x3, p3, m3), dim=1))
-        decoded = self._up_to(decoded, x2)
-        decoded = self.fuse2(torch.cat((decoded, x2, p2, m2), dim=1))
-        decoded = self._up_to(decoded, x1)
-        decoded = self.fuse1(torch.cat((decoded, x1, p1, m1), dim=1))
+        def inputs(*values):
+            return torch.cat(values, dim=1)
+
+        decoded = self.fuse5(inputs(*((x5,) if self.use_polar_features else ()), p5, m5))
+        decoded = self._up_to(decoded, p4)
+        decoded = self.fuse4(inputs(decoded, *((x4,) if self.use_polar_features else ()), p4, m4))
+        decoded = self._up_to(decoded, p3)
+        decoded = self.fuse3(inputs(decoded, *((x3,) if self.use_polar_features else ()), p3, m3))
+        decoded = self._up_to(decoded, p2)
+        decoded = self.fuse2(inputs(decoded, *((x2,) if self.use_polar_features else ()), p2, m2))
+        decoded = self._up_to(decoded, p1)
+        decoded = self.fuse1(inputs(decoded, *((x1,) if self.use_polar_features else ()), p1, m1))
 
         # A bounded parameterization prevents invalid/negative geometry during
         # early joint training; held-out observed-depth targets provide scale.
@@ -342,12 +377,14 @@ class PolarDepthSelfSupervision(nn.Module):
         normal_weight: float = 1.0,
         sparse_depth_weight: float = 1.0,
         smoothness_weight: float = 0.01,
+        use_polar_features: bool = True,
     ):
         super().__init__()
         if not 0 < depth_keep_probability < 1:
             raise ValueError("depth_keep_probability must be in (0,1)")
         self.decoder = PolarPointDepthDecoder(
-            feature_channels, point_feature_channels, min_depth, max_depth
+            feature_channels, point_feature_channels, min_depth, max_depth,
+            use_polar_features=use_polar_features,
         )
         self.depth_keep_probability = float(depth_keep_probability)
         self.normal_weight = float(normal_weight)
@@ -361,7 +398,7 @@ class PolarDepthSelfSupervision(nn.Module):
 
     def forward(
         self,
-        feature_levels: tuple[Tensor, ...],
+        feature_levels: tuple[Tensor, ...] | None,
         point_feature_levels: tuple[Tensor, ...],
         point_valid_levels: tuple[Tensor, ...],
         polar_images: Tensor,
@@ -396,7 +433,11 @@ class PolarDepthSelfSupervision(nn.Module):
                     f"normal_targets must have shape {expected_normal_shape}"
                 )
 
-        flat_levels = tuple(level.reshape(batch * views, *level.shape[2:]) for level in feature_levels)
+        flat_levels = None
+        if feature_levels is not None:
+            flat_levels = tuple(
+                level.reshape(batch * views, *level.shape[2:]) for level in feature_levels
+            )
         flat_point_levels = tuple(
             level.reshape(batch * views, *level.shape[2:])
             for level in point_feature_levels

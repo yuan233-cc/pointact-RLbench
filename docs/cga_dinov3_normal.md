@@ -46,17 +46,46 @@ from the four analyzer images, without using depth or normal GT as an input:
   maximum-minus-minimum analyzer intensity.
 
 All converted records use camera coordinates with `+x` right, `+y` down, and
-`+z` forward. Supervision and physical candidates are face-forwarded against
-the camera ray. SfPUEL groups are keyed by the first filename component so
+`+z` forward. Supervision is face-forwarded against the camera ray when
+intrinsics are known; physical candidates use the camera-facing `-z`
+hemisphere. Pixel centers are `(x+0.5,y+0.5)`.
+SfPUEL groups are keyed by the first filename component so
 material/view variants of one synthetic object cannot cross splits. HAMMER
-groups are complete continuous trajectory directories. RLBench groups must be
+groups are complete scenes, keeping all their trajectories on one side of the
+split. The empty-object `_naked` trajectories are excluded. RLBench groups must be
 complete `task + episode + seed` identities.
+
+HAMMER does not ship a `norm/` modality in the public archive. Its adapter
+derives supervision only from the clean polarization-camera `_gt` z-depth and
+the sequence's own `intrinsics.txt`, using centered 3D finite differences and
+rejecting invalid pixels and depth discontinuities. No noisy D435/L515/ToF
+sensor depth is used as normal supervision.
+
+SfPUEL's official loader decodes 16-bit normal PNGs as RGB divided by 65535,
+then mapped from `[0,1]` to `[-1,1]`. The raw map has image-right `x`,
+image-up `y`, and camera-facing `+z`; the adapter applies `(x,y,z) ->
+(x,-y,-z)` before unit normalization. Because SfPUEL does not provide camera
+intrinsics, its `image_coordinate` is the constant optical-axis vector
+`(0,0,1)` rather than an invented per-pixel perspective ray. The axis choice
+was checked against the raw normal-map colors and the polarization prior on
+the local subset; it should be revisited if another SfPUEL release changes
+the normal-map convention.
+
+The RLBench Mitsuba source stores negative `fx` and `fy` but renders rays
+using their absolute values. Its raw AOV camera `x/y` axes must both be
+negated to match image-right/image-down coordinates. The adapter converts
+the focal signs and AOV axes, then keeps only valid pixels where the AOV
+normal agrees within 15 degrees with a normal independently reconstructed
+from rendered z-depth. This geometry check removes discontinuities and
+shading normals that differ strongly from the visible surface geometry.
+The 44-frame local subset retains about 80% of pixels after this check.
 
 ```bash
 python scripts/prepare_polar_normal_sources.py sfpuel \
   --input-root /data/SfPUEL-training \
   --output /data/cga/sfpuel \
-  --group-prefix-components 1
+  --group-prefix-components 1 \
+  --spatial-stride 4
 
 python scripts/prepare_polar_normal_sources.py rlbench \
   --input-root /data/reach_target_episode_polar_normal \
@@ -64,11 +93,14 @@ python scripts/prepare_polar_normal_sources.py rlbench \
   --group reach_target_ep0_seed7
 ```
 
-HAMMER stores the four analyzer observations as quadrants. The public PPFT
-preprocessing marks its angle-to-quadrant assignment as a guess, so the
-converter has no default. First score all 24 layouts against independent normal
-GT, inspect the score gap and visual QA, then pass the selected layout
-explicitly:
+HAMMER stores the four analyzer observations as quadrants. [LUCID's Phoenix
+camera example](https://thinklucid.com/polarized-camera-resource-center/3d-depth-from-polarization-sfp/)
+reads the four quadrants in top-left/top-right/bottom-left/bottom-right order
+as 0/45/90/135 degrees; its [Bayer polarization pixel format](https://support.thinklucid.com/knowledgebase/pixel-formats-area-scan/)
+also names the channels in that order. The [PPFT HAMMER preprocessing](https://github.com/lastbasket/Polarization-Prompt-Fusion-Tuning/blob/master/scripts/data_processing/process_hammer.py)
+uses the same ordering but explicitly calls it a guess. Because HAMMER itself
+does not publish capture-format metadata, the converter still requires an
+explicit layout:
 
 ```bash
 python scripts/prepare_polar_normal_sources.py hammer-calibrate \
@@ -77,10 +109,31 @@ python scripts/prepare_polar_normal_sources.py hammer-calibrate \
 python scripts/prepare_polar_normal_sources.py hammer \
   --input-root /data/HAMMER \
   --output /data/cga/hammer \
-  --quadrant-layout 0,45,90,135
+  --quadrant-layout 0,45,90,135 \
+  --spatial-stride 4
 ```
 
-The last layout is only an argument example, not a validated HAMMER mapping.
+On the local 16-frame, eight-sequence subset, a physics-candidate score ranked
+`45,90,0,135` first, only 0.08 degrees ahead of the next layout. This is too
+small a margin to overrule LUCID's documented camera output ordering, and the
+score depends on material/reflection assumptions. The Stokes orthogonal-pair
+sum differences are also small across candidate pairings. The calibration
+JSONs remain as audit artifacts. Use `0,45,90,135` for the current HAMMER
+records, while retaining the qualification that HAMMER authors have not
+confirmed whether their saved PNGs were reordered after capture. Geometry
+supervision from clean depth is independent of this quadrant choice.
+`--spatial-stride 4` matches the public PPFT HAMMER loader's spatial reduction
+and prevents packed float records from becoming unnecessarily large.
+
+Create leakage-safe splits only at whole-group granularity:
+
+```bash
+python scripts/split_polar_normal_manifest.py \
+  --manifest /data/cga/hammer/manifest.json \
+  --train-output /data/cga/hammer/train_manifest.json \
+  --val-output /data/cga/hammer/val_manifest.json \
+  --val-fraction 0.2 --seed 7
+```
 
 ```bash
 python scripts/prepare_cga_priors.py \

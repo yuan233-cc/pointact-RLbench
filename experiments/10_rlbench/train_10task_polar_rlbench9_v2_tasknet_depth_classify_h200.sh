@@ -59,6 +59,8 @@ fi
 source_data_path="${DATA_PATH:-experiments/10_rlbench/data_configs/data-10task-polar-rlbench9-v2-incomplete-sfp-wild-proxy.yaml}"
 output_dir="${OUTPUT_DIR:-$repo_root/checkpoints/rlbench/pointact-rlbench9-v2-tasknet-depth-classify-h200}"
 classifier_config_dir="$output_dir/classifier_input_config"
+read -r -a bbox_expansion <<< "${POLAR_BBOX_EXPANSION:-1.0 1.0 1.0 1.0 1.0}"
+read -r -a bbox_feature_levels <<< "${POLAR_BBOX_FEATURE_LEVELS:-0 0 1 2 2}"
 prepare_args=("$source_data_path" "$classifier_config_dir")
 if [[ -n "${DATASET_ROOT:-}" ]]; then
     prepare_args+=(--dataset-root "$DATASET_ROOT")
@@ -110,7 +112,7 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_enc_channels "${ptv3_channels[@]}" \
     --ptv3_enc_depths 3 3 3 12 3 --ptv3_enc_num_head "${ptv3_heads[@]}" \
     --ptv3_input_channels 9 --ptv3_init_copy_input_channels 6 \
-    --ptv3_apply_point_ca False --ptv3_init_ckpt_file "$ptv3_checkpoint" \
+    --ptv3_apply_point_ca "${PTV3_APPLY_POINT_CA:-False}" --ptv3_init_ckpt_file "$ptv3_checkpoint" \
     --ptv3_clf_head_pos_bins "${POSITION_BINS:-100}" \
     --action_head_pos_center moe \
     --max_state_dim 10 --max_action_dim 10 \
@@ -118,11 +120,17 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --polarapp_checkpoint "$tasknet_checkpoint" \
     --polarapp_allow_random_init False --polarapp_freeze "$tasknet_freeze" \
     --polarapp_pyramid_channels "${TASKNET_PYRAMID_CHANNELS:-192}" \
-    --polarapp_input_mode sfp_proxy "${tasknet_lr_args[@]}" \
+    --polarapp_input_mode sfp_proxy \
+    --polarapp_input_size "${TASKNET_INPUT_SIZE:-64}" "${tasknet_lr_args[@]}" \
     --sfp_feature_levels x1 x2 x3 x4 x5 \
     --polar_neighbor_radius "${POLAR_NEIGHBOR_RADIUS:-2}" \
     --polar_max_tokens_per_group "${POLAR_MAX_TOKENS_PER_GROUP:-64}" \
     --polar_token_mode "${POLAR_TOKEN_MODE:-local}" \
+    --polar_fusion_mode "${POLAR_FUSION_MODE:-projection}" \
+    --polar_bbox_grid_size "${POLAR_BBOX_GRID_SIZE:-4}" \
+    --polar_bbox_expansion "${bbox_expansion[@]}" \
+    --polar_bbox_feature_levels "${bbox_feature_levels[@]}" \
+    --polar_workspace_attend_action "${POLAR_WORKSPACE_ATTEND_ACTION:-False}" \
     --polar_max_views 1 --polar_writeback False \
     --use_polar_depth_self_supervision True \
     --polar_depth_loss_weight "${POLAR_DEPTH_LOSS_WEIGHT:-0.1}" \

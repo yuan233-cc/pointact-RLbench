@@ -59,11 +59,17 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         polarapp_allow_random_init=False,
         polarapp_pyramid_channels=128,
         polarapp_input_mode="sfp_proxy",
+        polarapp_input_size=64,
         polar_neighbor_radius=1,
         polar_max_tokens_per_group=32,
         polar_max_views=8,
         polar_token_mode="local",
         polar_writeback=False,
+        polar_fusion_mode="projection",
+        polar_bbox_grid_size=4,
+        polar_bbox_expansion=(1.0, 1.0, 1.0, 1.0, 1.0),
+        polar_bbox_feature_levels=(0, 0, 1, 2, 2),
+        polar_workspace_attend_action=False,
         use_polar_depth_self_supervision=False,
         polar_depth_loss_weight=0.1,
         polar_consistency_weight=1.0,
@@ -135,11 +141,45 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.polarapp_allow_random_init = polarapp_allow_random_init
         self.polarapp_pyramid_channels = polarapp_pyramid_channels
         self.polarapp_input_mode = polarapp_input_mode
+        self.polarapp_input_size = polarapp_input_size
         self.polar_neighbor_radius = polar_neighbor_radius
         self.polar_max_tokens_per_group = polar_max_tokens_per_group
         self.polar_max_views = polar_max_views
         self.polar_token_mode = polar_token_mode
         self.polar_writeback = polar_writeback
+        self.polar_fusion_mode = polar_fusion_mode
+        self.polar_bbox_grid_size = polar_bbox_grid_size
+        self.polar_bbox_expansion = list(polar_bbox_expansion)
+        self.polar_bbox_feature_levels = list(polar_bbox_feature_levels)
+        self.polar_workspace_attend_action = polar_workspace_attend_action
+        if polar_fusion_mode not in ("projection", "bbox", "workspace"):
+            raise ValueError("polar_fusion_mode must be 'projection', 'bbox' or 'workspace'")
+        if polar_fusion_mode == "workspace":
+            if not polar_enabled or polar_backbone != "polarapp_taskaware":
+                raise ValueError("Workspace fusion requires polar_enabled and polarapp_taskaware")
+            if ptv3_backend != "concerto":
+                raise ValueError("Workspace fusion is implemented for the Concerto PTv3 backend")
+            if len(polar_bbox_feature_levels) != len(ptv3_enc_depths) or any(
+                not isinstance(level, int) or isinstance(level, bool) or level not in (0, 1, 2)
+                for level in polar_bbox_feature_levels
+            ):
+                raise ValueError("Map every PTv3 stage to a TaskNet TaF level 0, 1 or 2")
+        if polar_fusion_mode == "bbox":
+            if not polar_enabled or polar_backbone != "polarapp_taskaware":
+                raise ValueError("BBox fusion requires polar_enabled and polarapp_taskaware")
+            if polar_token_mode != "local":
+                raise ValueError("BBox fusion uses local attention groups, not polar_token_mode='all'")
+            if polar_bbox_grid_size not in (2, 4, 6):
+                raise ValueError("BBox regular grid must be 2x2, 4x4 or 6x6")
+            if len(polar_bbox_expansion) != len(ptv3_enc_depths) or any(
+                not 1 <= float(alpha) < float("inf") for alpha in polar_bbox_expansion
+            ):
+                raise ValueError("Provide one finite bbox expansion >=1 for each PTv3 stage")
+            if len(polar_bbox_feature_levels) != len(ptv3_enc_depths) or any(
+                not isinstance(level, int) or isinstance(level, bool) or level not in (0, 1, 2)
+                for level in polar_bbox_feature_levels
+            ):
+                raise ValueError("Map every PTv3 stage to a TaskNet TaF level 0, 1 or 2")
         self.use_polar_depth_self_supervision = use_polar_depth_self_supervision
         self.polar_depth_loss_weight = polar_depth_loss_weight
         self.polar_consistency_weight = polar_consistency_weight
@@ -191,6 +231,8 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 )
             if polarapp_pyramid_channels <= 0:
                 raise ValueError("polarapp_pyramid_channels must be positive")
+            if not isinstance(polarapp_input_size, int) or isinstance(polarapp_input_size, bool) or polarapp_input_size < 4:
+                raise ValueError("polarapp_input_size must be an integer >= 4")
         if use_polar_depth_self_supervision and not polar_enabled:
             raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
         if use_polar_depth_self_supervision and polar_backbone not in (

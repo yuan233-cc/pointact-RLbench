@@ -99,6 +99,42 @@ class SfpEncoderTest(unittest.TestCase):
 
 
 class PolarRouterTest(unittest.TestCase):
+    def test_exact_route_cache_reuses_geometry_and_gradients(self):
+        torch.manual_seed(17)
+        original = torch.randn(1, 1, 8, 8, 3)
+        coords = torch.tensor([
+            [-0.2, -0.2, 1.0], [0.0, -0.2, 1.0],
+            [0.2, 0.0, 1.0], [0.0, 0.2, 1.0],
+        ])
+        baseline_features = original.clone().requires_grad_()
+        cached_features = original.clone().requires_grad_()
+        baseline_point = make_route_point(
+            baseline_features, coords.clone(), torch.zeros(4, dtype=torch.long)
+        )
+        cached_point = make_route_point(
+            cached_features, coords.clone(), torch.zeros(4, dtype=torch.long)
+        )
+        order = torch.tensor([0, 1, 2, 3])
+        lengths = torch.tensor([2, 2])
+        baseline_router = PolarTokenRouter(0, neighbor_radius=2, max_tokens=3, cache_routes=False)
+        cached_router = PolarTokenRouter(0, neighbor_radius=2, max_tokens=3, cache_routes=True)
+        baseline_a = baseline_router(baseline_point, order, lengths)
+        baseline_b = baseline_router(baseline_point, order, lengths)
+        cached_a = cached_router(cached_point, order, lengths)
+        cached_b = cached_router(cached_point, order, lengths)
+        self.assertEqual(len(cached_point["_polar_route_cache"]), 1)
+        self.assertEqual(baseline_point["polar_route_stats"], cached_point["polar_route_stats"])
+        for expected, actual in zip(baseline_a + baseline_b, cached_a + cached_b):
+            self.assertTrue(torch.equal(expected.grid_indices, actual.grid_indices))
+            self.assertTrue(torch.equal(expected.features, actual.features))
+            self.assertTrue(torch.equal(expected.xy, actual.xy))
+        sum(route.features.sum() for route in baseline_a + baseline_b).backward()
+        sum(route.features.sum() for route in cached_a + cached_b).backward()
+        self.assertTrue(torch.equal(baseline_features.grad, cached_features.grad))
+        cached_point.coord[0, 0] += 0.1
+        cached_router(cached_point, order, lengths)
+        self.assertEqual(len(cached_point["_polar_route_cache"]), 2)
+
     def test_all_mode_repeats_every_sample_token_for_each_group(self):
         features = torch.arange(
             2 * 2 * 3, dtype=torch.float32
@@ -288,6 +324,32 @@ class JointAttentionTest(unittest.TestCase):
         for gradient in gradients:
             self.assertIsNotNone(gradient)
             self.assertTrue(torch.isfinite(gradient).all())
+
+    def test_workspace_adapter_gets_gradient_with_frozen_tasknet_tokens(self):
+        from pointact.model.ptv3.concerto.model_ca_action import PolarStagePreparation
+
+        adapter = PolarStagePreparation(
+            input_channels=6,
+            output_channels=8,
+            stage_index=0,
+            bbox_feature_level=0,
+            workspace_mode=True,
+        )
+        frozen_bank = torch.randn(2, 1, 6, 8, 8)
+        point = AttrDict(
+            polar_bbox_feature_bank=(frozen_bank, None, None),
+            polar_bbox_bank_strides=(4.0, 8.0, 16.0),
+            polar_bbox_bank_offsets=(1.5, 3.5, 7.5),
+            polar_workspace_mask=torch.ones(2, 1, 32, 32, dtype=torch.bool),
+            pixel_valid=torch.ones(2, 1, 32, 32, dtype=torch.bool),
+        )
+        point = adapter(point)
+        point.polar_workspace_tokens.square().mean().backward()
+        assert frozen_bank.grad is None
+        gradients = [parameter.grad for parameter in adapter.adapter.parameters()]
+        self.assertTrue(all(gradient is not None for gradient in gradients))
+        self.assertTrue(all(torch.isfinite(gradient).all() for gradient in gradients))
+        self.assertEqual(point.polar_workspace_offset.tolist(), [64, 128])
 
     @unittest.skipUnless(
         torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8,

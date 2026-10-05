@@ -105,7 +105,13 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         )
         inputs = {key: inputs.get(key) for key in material_keys}
         if not self.config.use_polar_material_conditioning:
-            if any(value is not None for value in inputs.values()):
+            # Pixel correspondence is also a first-class bbox-fusion input;
+            # it does not imply that the material conditioner is enabled.
+            allowed = (
+                {"point_pixel_indices"}
+                if self.config.polar_fusion_mode in ("bbox", "workspace") else set()
+            )
+            if any(value is not None for key, value in inputs.items() if key not in allowed):
                 raise ValueError("Material tensors were provided but use_polar_material_conditioning is disabled")
             return None
         missing = [key for key, value in inputs.items() if value is None and key != "material_candidate_mask"]
@@ -207,6 +213,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidates: torch.Tensor | None = None,
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
+        point_pixel_image_hw: torch.Tensor | None = None,
         polar_images: torch.Tensor | None = None,
         polar_rgb: torch.Tensor | None = None,
         polar_physical_prior: torch.Tensor | None = None,
@@ -215,6 +222,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         T_model_from_world: torch.Tensor | None = None,
         view_valid: torch.Tensor | None = None,
         pixel_valid: torch.Tensor | None = None,
+        polar_workspace_mask: torch.Tensor | None = None,
         polar_pixel_transform: torch.Tensor | None = None,
         observed_depth: torch.Tensor | None = None,
         observed_depth_valid: torch.Tensor | None = None,
@@ -273,6 +281,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidates=material_candidates,
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
+                point_pixel_image_hw=point_pixel_image_hw,
                 polar_images=polar_images,
                 polar_rgb=polar_rgb,
                 polar_physical_prior=polar_physical_prior,
@@ -280,6 +289,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 T_camera_from_model=T_camera_from_model,
                 view_valid=view_valid,
                 pixel_valid=pixel_valid,
+                polar_workspace_mask=polar_workspace_mask,
                 polar_pixel_transform=polar_pixel_transform,
             )
         else:
@@ -322,6 +332,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 material_candidates=material_candidates,
                 material_candidate_mask=material_candidate_mask,
                 point_pixel_indices=point_pixel_indices,
+                point_pixel_image_hw=point_pixel_image_hw,
                 polar_images=polar_images,
                 polar_rgb=polar_rgb,
                 polar_physical_prior=polar_physical_prior,
@@ -329,6 +340,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
                 T_camera_from_model=T_camera_from_model,
                 view_valid=view_valid,
                 pixel_valid=pixel_valid,
+                polar_workspace_mask=polar_workspace_mask,
                 polar_pixel_transform=polar_pixel_transform,
                 observed_depth=observed_depth,
                 observed_depth_valid=observed_depth_valid,
@@ -410,6 +422,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         material_candidates: torch.Tensor | None = None,
         material_candidate_mask: torch.Tensor | None = None,
         point_pixel_indices: torch.Tensor | None = None,
+        point_pixel_image_hw: torch.Tensor | None = None,
         polar_images: torch.Tensor | None = None,
         polar_rgb: torch.Tensor | None = None,
         polar_physical_prior: torch.Tensor | None = None,
@@ -417,6 +430,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
         T_camera_from_model: torch.Tensor | None = None,
         view_valid: torch.Tensor | None = None,
         pixel_valid: torch.Tensor | None = None,
+        polar_workspace_mask: torch.Tensor | None = None,
         polar_pixel_transform: torch.Tensor | None = None,
         input_id_lens: list[int] = None,
         **kwargs,
@@ -466,6 +480,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             material_candidates=material_candidates,
             material_candidate_mask=material_candidate_mask,
             point_pixel_indices=point_pixel_indices,
+            point_pixel_image_hw=point_pixel_image_hw,
             polar_images=polar_images,
             polar_rgb=polar_rgb,
             polar_physical_prior=polar_physical_prior,
@@ -473,6 +488,7 @@ class VLAEncDec3DBaseModel(PreTrainedModel, GenerationMixin, ABC):
             T_camera_from_model=T_camera_from_model,
             view_valid=view_valid,
             pixel_valid=pixel_valid,
+            polar_workspace_mask=polar_workspace_mask,
             polar_pixel_transform=polar_pixel_transform,
         )
     
@@ -785,11 +801,20 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             ptv3_backend=self.config.ptv3_backend,
             auxiliary_decoder=self.config.use_target_reconstruction,
             polar_enabled=self.config.polar_enabled,
-            sfp_feature_channels=polar_feature_channels,
+            sfp_feature_channels=(
+                tuple(PolarAppTaskAwareEncoder.task_feature_channels[level]
+                      for level in self.config.polar_bbox_feature_levels)
+                if self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
+            ),
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
             polar_max_views=self.config.polar_max_views,
             polar_token_mode=self.config.polar_token_mode,
+            polar_fusion_mode=self.config.polar_fusion_mode,
+            polar_bbox_grid_size=self.config.polar_bbox_grid_size,
+            polar_bbox_expansion=self.config.polar_bbox_expansion,
+            polar_bbox_feature_levels=self.config.polar_bbox_feature_levels,
+            polar_workspace_attend_action=self.config.polar_workspace_attend_action,
         )
         if self.config.polar_enabled:
             if self.config.polar_backbone == "sfp_wild":
@@ -824,6 +849,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 normal_weight=self.config.polar_consistency_weight,
                 sparse_depth_weight=self.config.sparse_depth_consistency_weight,
                 smoothness_weight=self.config.depth_smoothness_weight,
+                use_polar_features=self.config.polar_fusion_mode != "workspace",
             )
             self.completion_action_projection = nn.Sequential(
                 nn.LayerNorm(32),
@@ -1017,7 +1043,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         names = (
             "polar_images", "polar_K", "T_camera_from_model", "view_valid",
             "pixel_valid", "polar_pixel_transform", "polar_rgb",
-            "polar_physical_prior",
+            "polar_physical_prior", "polar_workspace_mask",
         )
         values = {name: kwargs.get(name) for name in names}
         if not self.config.polar_enabled:
@@ -1036,6 +1062,8 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 "polar_images must be [B,V,7,H,W] and match the action batch"
             )
         batch, views, _, height, width = images.shape
+        if self.config.polar_fusion_mode in ("bbox", "workspace") and views != 1:
+            raise ValueError("Image-space TaskNet fusion currently supports one frontview per sample")
         if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
             prior = values["polar_physical_prior"]
             if prior is None:
@@ -1083,6 +1111,14 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
 
         task_features = None
         if self.config.polar_backbone == "polarapp_taskaware":
+            task_size = (
+                self.config.polarapp_input_size
+                if self.config.polar_fusion_mode == "workspace" else height
+            )
+            if flat_images.shape[-2:] != (task_size, task_size):
+                flat_images = F.interpolate(
+                    flat_images, size=(task_size, task_size), mode="bilinear", align_corners=False
+                )
             task_features = encoder.forward_task_features(flat_images)
             flat_levels = encoder.build_pyramid(task_features)
         elif self._polar_encoder_frozen():
@@ -1105,13 +1141,49 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
         }
         if task_features is not None:
             context["tasknet_features"] = task_features
+            if self.config.polar_fusion_mode in ("bbox", "workspace"):
+                context["polar_bbox_feature_bank"] = tuple(
+                    feature.reshape(batch, views, *feature.shape[1:]).float() for feature in task_features
+                )
+                scale = height / float(task_size)
+                if height != width:
+                    raise ValueError("TaskNet image-space fusion currently requires square inputs")
+                context["polar_bbox_bank_strides"] = tuple(
+                    scale * stride for stride in encoder.task_feature_strides
+                )
+                context["polar_bbox_bank_offsets"] = tuple(
+                    scale * (offset + 0.5) - 0.5 for offset in encoder.task_feature_offsets
+                )
+                pixels = kwargs.get("point_pixel_indices")
+                if pixels is None:
+                    raise ValueError("Image-space TaskNet fusion requires current-observation point_pixel_indices")
+                context["point_pixel_indices"] = pixels
+                if kwargs.get("point_pixel_image_hw") is not None:
+                    context["point_pixel_image_hw"] = kwargs["point_pixel_image_hw"]
+                if not getattr(self, "_tasknet_bbox_shapes_logged", False):
+                    logger.info(
+                        "Image-space TaskNet bank shapes=%s, PTv3 level mapping=%s, alpha=%s, grid=%sx%s",
+                        [tuple(feature.shape) for feature in context["polar_bbox_feature_bank"]],
+                        self.config.polar_bbox_feature_levels, self.config.polar_bbox_expansion,
+                        self.config.polar_bbox_grid_size, self.config.polar_bbox_grid_size,
+                    )
+                    self._tasknet_bbox_shapes_logged = True
         if hasattr(encoder, "feature_strides") and hasattr(encoder, "feature_offsets"):
-            context["polar_feature_strides"] = tuple(encoder.feature_strides)
-            context["polar_feature_offsets"] = tuple(encoder.feature_offsets)
+            scale = height / float(task_size) if task_features is not None else 1.0
+            context["polar_feature_strides"] = tuple(scale * stride for stride in encoder.feature_strides)
+            context["polar_feature_offsets"] = tuple(
+                scale * (offset + 0.5) - 0.5 for offset in encoder.feature_offsets
+            )
         if values["pixel_valid"] is not None:
             if values["pixel_valid"].shape != (batch, views, height, width):
                 raise ValueError("pixel_valid must be [B,V,H,W]")
             context["pixel_valid"] = values["pixel_valid"].bool()
+        if values["polar_workspace_mask"] is not None:
+            if values["polar_workspace_mask"].shape != (batch, views, height, width):
+                raise ValueError("polar_workspace_mask must be [B,V,H,W]")
+            context["polar_workspace_mask"] = values["polar_workspace_mask"].bool()
+        elif self.config.polar_fusion_mode == "workspace":
+            raise ValueError("Workspace fusion requires polar_workspace_mask from the dataset")
         if values["polar_pixel_transform"] is not None:
             context["polar_pixel_transform"] = values["polar_pixel_transform"]
         return context
@@ -1148,6 +1220,14 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                         normalize=True,
                         output_frame="sfp_wild",
                     )
+                    if normal_targets.shape[-2:] != tuple(polar_images.shape[-2:]):
+                        normal_targets = F.interpolate(
+                            normal_targets,
+                            size=polar_images.shape[-2:],
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        normal_targets = F.normalize(normal_targets, dim=1, eps=1e-6)
             else:
                 raise RuntimeError(
                     "The selected polar backbone does not provide normal targets"
@@ -1166,9 +1246,15 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             pixel_transform=polar_context.get("polar_pixel_transform"),
             feature_strides=polar_context.get("polar_feature_strides"),
             feature_offsets=polar_context.get("polar_feature_offsets"),
+            correspondence_mode=self.config.polar_fusion_mode,
+        )
+        decoder_polar_levels = (
+            None
+            if self.config.polar_fusion_mode == "workspace"
+            else polar_context["polar_feature_levels"]
         )
         return self.polar_depth_self_supervision(
-            feature_levels=polar_context["polar_feature_levels"],
+            feature_levels=decoder_polar_levels,
             point_feature_levels=point_levels,
             point_valid_levels=point_valid_levels,
             polar_images=polar_images,
@@ -1316,7 +1402,14 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 transforms=polar_context["T_camera_from_model"],
                 view_valid=polar_context["view_valid"],
                 pixel_transform=polar_context.get("polar_pixel_transform"),
+                point_pixel_indices=(
+                    polar_context["point_pixel_indices"] if self.config.polar_fusion_mode in ("bbox", "workspace") else None
+                ),
+                point_pixel_image_hw=polar_context.get("point_pixel_image_hw"),
             )
+            if self.config.polar_fusion_mode in ("bbox", "workspace"):
+                polar_context = dict(polar_context)
+                polar_context["point_pixel_indices"] = polar_context["point_pixel_indices"][point_keep]
             if point_condition is not None:
                 point_condition = point_condition[point_keep]
 
@@ -1434,11 +1527,20 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             apply_point_ca=self.config.ptv3_apply_point_ca,
             ptv3_backend=self.config.ptv3_backend,
             polar_enabled=self.config.polar_enabled,
-            sfp_feature_channels=polar_feature_channels,
+            sfp_feature_channels=(
+                tuple(PolarAppTaskAwareEncoder.task_feature_channels[level]
+                      for level in self.config.polar_bbox_feature_levels)
+                if self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
+            ),
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
             polar_max_views=self.config.polar_max_views,
             polar_token_mode=self.config.polar_token_mode,
+            polar_fusion_mode=self.config.polar_fusion_mode,
+            polar_bbox_grid_size=self.config.polar_bbox_grid_size,
+            polar_bbox_expansion=self.config.polar_bbox_expansion,
+            polar_bbox_feature_levels=self.config.polar_bbox_feature_levels,
+            polar_workspace_attend_action=self.config.polar_workspace_attend_action,
         )
         if self.config.polar_enabled:
             if self.config.polar_backbone == "sfp_wild":
@@ -1486,6 +1588,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 normal_weight=self.config.polar_consistency_weight,
                 sparse_depth_weight=self.config.sparse_depth_consistency_weight,
                 smoothness_weight=self.config.depth_smoothness_weight,
+                use_polar_features=self.config.polar_fusion_mode != "workspace",
             )
             self.completion_action_projection = nn.Sequential(
                 nn.LayerNorm(32),
@@ -1685,6 +1788,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         names = (
             "polar_images", "polar_K", "T_camera_from_model", "view_valid",
             "pixel_valid", "polar_pixel_transform", "polar_rgb", "polar_physical_prior",
+            "polar_workspace_mask",
         )
         values = {name: kwargs.get(name) for name in names}
         if not self.config.polar_enabled:
@@ -1699,6 +1803,8 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         if images.ndim != 5 or images.shape[0] != batch_size or images.shape[2] != 7:
             raise ValueError("polar_images must be [B,V,7,H,W] and match the action batch")
         batch, views, _, height, width = images.shape
+        if self.config.polar_fusion_mode in ("bbox", "workspace") and views != 1:
+            raise ValueError("Image-space TaskNet fusion currently supports one frontview per sample")
         if self.config.polar_backbone in ("cga_transformer", "cga_dinov3_normal"):
             prior = values["polar_physical_prior"]
             if prior is None:
@@ -1736,6 +1842,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             # Run the released three-level TaskNet only once.  Its TaF1/2/3
             # tensors feed both the five-level PointACT bridge and, detached,
             # the released normal head used by the depth consistency loss.
+            task_size = (
+                self.config.polarapp_input_size
+                if self.config.polar_fusion_mode == "workspace" else height
+            )
+            if flat_images.shape[-2:] != (task_size, task_size):
+                flat_images = F.interpolate(
+                    flat_images, size=(task_size, task_size), mode="bilinear", align_corners=False
+                )
             task_features = encoder.forward_task_features(flat_images)
             flat_levels = encoder.build_pyramid(task_features)
         elif self._polar_encoder_frozen():
@@ -1758,13 +1872,49 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
         }
         if task_features is not None:
             context["tasknet_features"] = task_features
+            if self.config.polar_fusion_mode in ("bbox", "workspace"):
+                context["polar_bbox_feature_bank"] = tuple(
+                    feature.reshape(batch, views, *feature.shape[1:]).float() for feature in task_features
+                )
+                scale = height / float(task_size)
+                if height != width:
+                    raise ValueError("TaskNet image-space fusion currently requires square inputs")
+                context["polar_bbox_bank_strides"] = tuple(
+                    scale * stride for stride in encoder.task_feature_strides
+                )
+                context["polar_bbox_bank_offsets"] = tuple(
+                    scale * (offset + 0.5) - 0.5 for offset in encoder.task_feature_offsets
+                )
+                pixels = kwargs.get("point_pixel_indices")
+                if pixels is None:
+                    raise ValueError("Image-space TaskNet fusion requires current-observation point_pixel_indices")
+                context["point_pixel_indices"] = pixels
+                if kwargs.get("point_pixel_image_hw") is not None:
+                    context["point_pixel_image_hw"] = kwargs["point_pixel_image_hw"]
+                if not getattr(self, "_tasknet_bbox_shapes_logged", False):
+                    logger.info(
+                        "Image-space TaskNet bank shapes=%s, PTv3 level mapping=%s, alpha=%s, grid=%sx%s",
+                        [tuple(feature.shape) for feature in context["polar_bbox_feature_bank"]],
+                        self.config.polar_bbox_feature_levels, self.config.polar_bbox_expansion,
+                        self.config.polar_bbox_grid_size, self.config.polar_bbox_grid_size,
+                    )
+                    self._tasknet_bbox_shapes_logged = True
         if hasattr(encoder, "feature_strides") and hasattr(encoder, "feature_offsets"):
-            context["polar_feature_strides"] = tuple(encoder.feature_strides)
-            context["polar_feature_offsets"] = tuple(encoder.feature_offsets)
+            scale = height / float(task_size) if task_features is not None else 1.0
+            context["polar_feature_strides"] = tuple(scale * stride for stride in encoder.feature_strides)
+            context["polar_feature_offsets"] = tuple(
+                scale * (offset + 0.5) - 0.5 for offset in encoder.feature_offsets
+            )
         if values["pixel_valid"] is not None:
             if values["pixel_valid"].shape != (batch, views, height, width):
                 raise ValueError("pixel_valid must be [B,V,H,W]")
             context["pixel_valid"] = values["pixel_valid"].bool()
+        if values["polar_workspace_mask"] is not None:
+            if values["polar_workspace_mask"].shape != (batch, views, height, width):
+                raise ValueError("polar_workspace_mask must be [B,V,H,W]")
+            context["polar_workspace_mask"] = values["polar_workspace_mask"].bool()
+        elif self.config.polar_fusion_mode == "workspace":
+            raise ValueError("Workspace fusion requires polar_workspace_mask from the dataset")
         if values["polar_pixel_transform"] is not None:
             context["polar_pixel_transform"] = values["polar_pixel_transform"]
         return context
@@ -1801,6 +1951,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                         normalize=True,
                         output_frame="sfp_wild",
                     )
+                    if normal_targets.shape[-2:] != tuple(polar_images.shape[-2:]):
+                        normal_targets = F.interpolate(
+                            normal_targets,
+                            size=polar_images.shape[-2:],
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        normal_targets = F.normalize(normal_targets, dim=1, eps=1e-6)
             else:
                 raise RuntimeError(
                     "The selected polar backbone does not provide normal targets"
@@ -1819,9 +1977,15 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             pixel_transform=polar_context.get("polar_pixel_transform"),
             feature_strides=polar_context.get("polar_feature_strides"),
             feature_offsets=polar_context.get("polar_feature_offsets"),
+            correspondence_mode=self.config.polar_fusion_mode,
+        )
+        decoder_polar_levels = (
+            None
+            if self.config.polar_fusion_mode == "workspace"
+            else polar_context["polar_feature_levels"]
         )
         return self.polar_depth_self_supervision(
-            feature_levels=polar_context["polar_feature_levels"],
+            feature_levels=decoder_polar_levels,
             point_feature_levels=point_levels,
             point_valid_levels=point_valid_levels,
             polar_images=polar_images,
@@ -1930,7 +2094,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 transforms=polar_context["T_camera_from_model"],
                 view_valid=polar_context["view_valid"],
                 pixel_transform=polar_context.get("polar_pixel_transform"),
+                point_pixel_indices=(
+                    polar_context["point_pixel_indices"] if self.config.polar_fusion_mode in ("bbox", "workspace") else None
+                ),
+                point_pixel_image_hw=polar_context.get("point_pixel_image_hw"),
             )
+            if self.config.polar_fusion_mode in ("bbox", "workspace"):
+                polar_context = dict(polar_context)
+                polar_context["point_pixel_indices"] = polar_context["point_pixel_indices"][point_keep]
             if point_condition is not None:
                 point_condition = point_condition[point_keep]
         ptv3_output = self.ptv3_model(

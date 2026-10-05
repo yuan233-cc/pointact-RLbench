@@ -200,3 +200,23 @@ def test_full_self_supervision_loss_is_finite_and_has_decoder_gradients():
     assert objective.decoder.depth_head.weight.grad is not None
     assert all(level.grad is not None for level in point_levels)
     assert normal_targets.grad is None
+
+
+def test_point_only_decoder_has_no_dense_polar_input_path():
+    point_levels, point_valid = _point_maps(requires_grad=True)
+    point_levels = tuple(level[:, 0].detach().requires_grad_() for level in point_levels)
+    point_valid = tuple(level[:, 0] for level in point_valid)
+    decoder = PolarPointDepthDecoder(
+        POLAR_CHANNELS,
+        POINT_CHANNELS,
+        min_depth=0.05,
+        max_depth=3.0,
+        use_polar_features=False,
+    )
+    prediction, decoded = decoder(None, point_levels, point_valid)
+    assert prediction.shape == (1, 1, 32, 32)
+    assert decoded.shape == (1, 32, 32, 32)
+    # Coarsest block receives only projected points (64) and validity (1).
+    assert decoder.fuse5.layers[0].in_channels == 65
+    prediction.mean().backward()
+    assert point_levels[0].grad is not None

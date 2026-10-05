@@ -1,0 +1,28 @@
+data:
+  format: rlbench_polar_lmdb
+  dataset_root: robot_data/rlbench/lerobot_point_lmdb/hybridvla_10tasks_train_keysteps_polar_rlbench9_v2
+  train_manifest: robot_data/polar_normal_rlbench_v2_manifests/train.jsonl
+  val_manifest: robot_data/polar_normal_rlbench_v2_manifests/val.jsonl
+  input_mode: robot
+  image_size: 256
+  refractive_index: 1.5
+  normal_gt_source: archived Coppelia depth + same-object mask finite-difference normals
+  overfit_samples: null
+
+model:
+  use_dino: true
+  transformer_blocks: 8
+  transformer_dropout: 0.0
+  dinov3_weights: /path/to/dinov3_convnext_base_pretrain_lvd1689m.pth
+
+training:
+  output_dir: outputs/rlbench_v2_cga_dinov3_normal
+  seed: 7
+  device: cuda
+  epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  num_workers: 4
+  learning_rate: 1.0e-4
+  step_size: 10
+  gamma: 0.5

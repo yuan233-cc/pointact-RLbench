@@ -3,8 +3,8 @@ import torch.nn as nn
 
 try:
     import flash_attn
-except:
-    print('No flash attn')
+except ImportError:
+    flash_attn = None
 
 from pointact.model.ptv3.concerto.structure import Point
 from pointact.model.ptv3.concerto.module import PointModule, PointSequential
@@ -12,10 +12,13 @@ from pointact.model.ptv3.concerto.model import (
     GridPooling, GridUnpooling, Embedding, Block, MLP, SerializedAttention
 )
 from pointact.model.ptv3.concerto.model_ca import (
-    CABlock, PointTransformerV3CA,    
+    CABlock, PointTransformerV3CA, CrossAttention,
 )
 from pointact.model.ptv3.concerto.utils import offset2bincount
 from pointact.model.vla_pointact.action_head_3d.polar_router import PolarTokenRouter
+from pointact.model.vla_pointact.action_head_3d.polar_bbox_fusion import (
+    BboxPolarSampler, forward_bbox_joint_attention,
+)
 
 
 class GridPoolingWithAction(GridPooling):
@@ -87,27 +90,33 @@ class SerializedAttentionWithAction(SerializedAttention):
         max_tokens=32,
         max_views=8,
         token_mode="local",
+        fusion_mode="projection",
+        bbox_grid_size=4,
+        bbox_expansion=1.0,
     ):
         if self.enable_rpe:
             raise ValueError("Polar joint attention is incompatible with pure-point RPE")
         self.polar_enabled = True
-        self.polar_router = PolarTokenRouter(
-            level=stage_index,
-            neighbor_radius=neighbor_radius,
-            max_tokens=max_tokens,
-            mode=token_mode,
-        )
-        self.polar_norm = nn.LayerNorm(self.channels)
-        self.polar_position = nn.Linear(2, self.channels)
-        self.polar_view_embedding = nn.Embedding(max_views, self.channels)
-        self.polar_modality_embedding = nn.Parameter(torch.zeros(self.channels))
-        self.polar_qkv = nn.Linear(
-            self.channels, self.channels * 3, bias=self.qkv.bias is not None
-        )
+        self.polar_fusion_mode = fusion_mode
+        if fusion_mode == "bbox":
+            self.polar_bbox_sampler = BboxPolarSampler(stage_index, bbox_grid_size, bbox_expansion)
+        elif fusion_mode == "projection":
+            self.polar_router = PolarTokenRouter(
+                level=stage_index, neighbor_radius=neighbor_radius,
+                max_tokens=max_tokens, mode=token_mode,
+            )
+        if fusion_mode != "workspace":
+            self.polar_norm = nn.LayerNorm(self.channels)
+            self.polar_position = nn.Linear(2, self.channels)
+            self.polar_view_embedding = nn.Embedding(max_views, self.channels)
+            self.polar_modality_embedding = nn.Parameter(torch.zeros(self.channels))
+            self.polar_qkv = nn.Linear(
+                self.channels, self.channels * 3, bias=self.qkv.bias is not None
+            )
 
     @torch.no_grad()
     def copy_polar_qkv_(self):
-        if getattr(self, "polar_enabled", False):
+        if getattr(self, "polar_enabled", False) and self.polar_fusion_mode != "workspace":
             self.polar_qkv.weight.copy_(self.qkv.weight)
             if self.qkv.bias is not None:
                 self.polar_qkv.bias.copy_(self.qkv.bias)
@@ -125,6 +134,12 @@ class SerializedAttentionWithAction(SerializedAttention):
         return (attn @ v).transpose(0, 1).reshape(-1, C)
 
     def _forward_polar(self, point):
+        if self.polar_fusion_mode == "bbox":
+            return forward_bbox_joint_attention(
+                self, point,
+                flash_function=(flash_attn.flash_attn_varlen_qkvpacked_func if flash_attn is not None else None),
+                point_rope=getattr(self, "rope", None),
+            )
         bincount = offset2bincount(point.offset)
         if not self.enable_flash:
             self.patch_size = min(bincount.min().tolist(), self.patch_size_max)
@@ -197,7 +212,7 @@ class SerializedAttentionWithAction(SerializedAttention):
         return point
 
     def forward(self, point):
-        if getattr(self, "polar_enabled", False):
+        if getattr(self, "polar_enabled", False) and self.polar_fusion_mode != "workspace":
             return self._forward_polar(point)
         bincount = offset2bincount(point.offset)
 
@@ -343,6 +358,10 @@ class BlockWithAction(Block):
         polar_max_tokens = kwargs.pop("polar_max_tokens", 32)
         polar_max_views = kwargs.pop("polar_max_views", 8)
         polar_token_mode = kwargs.pop("polar_token_mode", "local")
+        polar_fusion_mode = kwargs.pop("polar_fusion_mode", "projection")
+        polar_bbox_grid_size = kwargs.pop("polar_bbox_grid_size", 4)
+        polar_bbox_expansion = kwargs.pop("polar_bbox_expansion", 1.0)
+        polar_workspace_attend_action = kwargs.pop("polar_workspace_attend_action", False)
         super().__init__(
             channels, 
             num_heads, 
@@ -356,7 +375,36 @@ class BlockWithAction(Block):
                 max_tokens=polar_max_tokens,
                 max_views=polar_max_views,
                 token_mode=polar_token_mode,
+                fusion_mode=polar_fusion_mode,
+                bbox_grid_size=polar_bbox_grid_size,
+                bbox_expansion=polar_bbox_expansion,
             )
+
+        self.polar_workspace_enabled = polar_enabled and polar_fusion_mode == "workspace"
+        self.polar_workspace_attend_action = polar_workspace_attend_action
+        if self.polar_workspace_enabled:
+            self.polar_cross_norm = kwargs["norm_layer"](channels)
+            self.polar_cross_attn = CrossAttention(
+                channels=channels,
+                num_heads=num_heads,
+                kv_channels=channels,
+                attn_drop=kwargs["attn_drop"],
+                proj_drop=kwargs["proj_drop"],
+                qk_norm=True,
+                enable_flash=kwargs["enable_flash"],
+            )
+            self.polar_cross_gate = nn.Parameter(torch.tensor(-2.0))
+            if self.polar_workspace_attend_action:
+                self.polar_action_cross_norm = kwargs["norm_layer"](channels)
+                self.polar_action_cross_attn = CrossAttention(
+                    channels=channels,
+                    num_heads=num_heads,
+                    kv_channels=channels,
+                    attn_drop=kwargs["attn_drop"],
+                    proj_drop=kwargs["proj_drop"],
+                    qk_norm=True,
+                    enable_flash=kwargs["enable_flash"],
+                )
 
         norm_layer = kwargs["norm_layer"]
         self.action_proj = nn.Linear(channels, channels)
@@ -393,6 +441,26 @@ class BlockWithAction(Block):
         point.feat = shortcut + point.feat
         if not self.pre_norm:
             point = self.norm1(point)
+        if self.polar_workspace_enabled:
+            cross = self.polar_cross_attn(
+                self.polar_cross_norm(point.feat),
+                point.polar_workspace_tokens,
+                point.offset,
+                point.polar_workspace_offset,
+            ).to(point.feat.dtype)
+            point.feat = point.feat + torch.sigmoid(self.polar_cross_gate) * cross
+            if self.polar_workspace_attend_action:
+                batch, actions, channels = point.action_feat.shape
+                action_offset = torch.arange(
+                    1, batch + 1, device=point.action_feat.device, dtype=torch.long
+                ) * actions
+                action = self.polar_action_cross_attn(
+                    self.polar_action_cross_norm(point.action_feat).reshape(-1, channels),
+                    point.polar_workspace_tokens,
+                    action_offset,
+                    point.polar_workspace_offset,
+                ).reshape(batch, actions, channels).to(point.action_feat.dtype)
+                point.action_feat = point.action_feat + torch.sigmoid(self.polar_cross_gate) * action
         shortcut = point.feat
         if self.pre_norm:
             point = self.norm2(point)
@@ -470,22 +538,86 @@ class CABlockWithAction(CABlock):
 
 
 class PolarStagePreparation(PointModule):
-    """Project one shared SfP feature level once for all blocks in a PTv3 stage."""
+    """Share one stage bank/adapter; bbox mode projects only sampled tokens."""
 
-    def __init__(self, input_channels, output_channels, stage_index):
+    def __init__(
+        self, input_channels, output_channels, stage_index,
+        bbox_feature_level=None, workspace_mode=False,
+    ):
         super().__init__()
         self.stage_index = stage_index
-        self.adapter = nn.Linear(input_channels, output_channels)
+        self.bbox_feature_level = bbox_feature_level
+        self.workspace_mode = workspace_mode
+        if workspace_mode:
+            self.adapter = nn.Sequential(
+                nn.Linear(input_channels, output_channels),
+                nn.GELU(),
+                nn.Linear(output_channels, output_channels),
+            )
+            self.position = nn.Linear(2, output_channels)
+            self.modality = nn.Parameter(torch.zeros(output_channels))
+        else:
+            self.adapter = nn.Linear(input_channels, output_channels)
         self.norm = nn.LayerNorm(output_channels)
 
     def forward(self, point):
-        levels = point.polar_feature_levels
-        if len(levels) != 5:
-            raise ValueError("polar_feature_levels must contain x1..x5")
-        feature = levels[self.stage_index]
+        if self.bbox_feature_level is None:
+            levels = point.polar_feature_levels
+            if len(levels) != 5:
+                raise ValueError("polar_feature_levels must contain x1..x5")
+            feature = levels[self.stage_index]
+        else:
+            levels = point.polar_bbox_feature_bank
+            if len(levels) != 3:
+                raise ValueError("BBox fusion requires the three full-image TaskNet TaF maps")
+            feature = levels[self.bbox_feature_level]
+            point.polar_bbox_geometry = (
+                point.polar_bbox_bank_strides[self.bbox_feature_level],
+                point.polar_bbox_bank_offsets[self.bbox_feature_level],
+            )
         if feature.ndim != 5:
             raise ValueError("Each Polar feature level must be [B,V,C,H,W]")
         feature = feature.permute(0, 1, 3, 4, 2)
+        if self.workspace_mode:
+            if feature.shape[1] != 1:
+                raise ValueError("Workspace fusion currently requires one frontview")
+            mask = point.polar_workspace_mask.float()
+            if mask.ndim != 4 or mask.shape[:2] != feature.shape[:2]:
+                raise ValueError("polar_workspace_mask must be [B,1,H,W]")
+            height, width = feature.shape[2:4]
+            mask = torch.nn.functional.adaptive_max_pool2d(mask, (height, width)).bool()
+            pixel_valid = point.get("pixel_valid")
+            if pixel_valid is not None:
+                valid = torch.nn.functional.adaptive_max_pool2d(
+                    pixel_valid.float(), (height, width)
+                ).bool()
+                mask &= valid
+            rows, cols = torch.meshgrid(
+                torch.arange(height, device=feature.device, dtype=feature.dtype),
+                torch.arange(width, device=feature.device, dtype=feature.dtype),
+                indexing="ij",
+            )
+            xy = torch.stack(
+                (2 * (cols + 0.5) / width - 1, 2 * (rows + 0.5) / height - 1), -1
+            )
+            flat_mask = mask[:, 0].flatten(1)
+            counts = flat_mask.sum(1).long()
+            torch._assert((counts > 0).all(), "Every sample needs a polar token in the 2D workspace")
+            flat_feature = feature[:, 0].flatten(1, 2)
+            flat_xy = xy.flatten(0, 1).unsqueeze(0).expand(feature.shape[0], -1, -1)
+            token = self.adapter(flat_feature[flat_mask])
+            point.polar_workspace_tokens = self.norm(
+                token + self.position(flat_xy[flat_mask]) + self.modality
+            )
+            point.polar_workspace_offset = counts.cumsum(0)
+            return point
+        if self.bbox_feature_level is not None:
+            # Sample in native TaF channels; project only K tokens/group.
+            # Expanding the whole dense bank to deep PTv3 channels wastes RAM.
+            point.polar_features = feature
+            point.polar_bbox_adapter = self.adapter
+            point.polar_bbox_norm = self.norm
+            return point
         point.polar_features = self.norm(self.adapter(feature))
         return point
 
@@ -530,6 +662,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         polar_max_tokens_per_group=32,
         polar_max_views=8,
         polar_token_mode="local",
+        polar_fusion_mode="projection",
+        polar_bbox_grid_size=4,
+        polar_bbox_expansion=(1.0,) * 5,
+        polar_bbox_feature_levels=(0, 0, 1, 2, 2),
+        polar_workspace_attend_action=False,
     ):
         PointModule.__init__(self)
 
@@ -598,6 +735,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         input_channels=sfp_feature_channels[s],
                         output_channels=enc_channels[s],
                         stage_index=s,
+                        bbox_feature_level=(
+                            polar_bbox_feature_levels[s]
+                            if polar_fusion_mode in ("bbox", "workspace") else None
+                        ),
+                        workspace_mode=polar_fusion_mode == "workspace",
                     ),
                     name="polar_prepare",
                 )
@@ -629,6 +771,10 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         polar_max_tokens=polar_max_tokens_per_group,
                         polar_max_views=polar_max_views,
                         polar_token_mode=polar_token_mode,
+                        polar_fusion_mode=polar_fusion_mode,
+                        polar_bbox_grid_size=polar_bbox_grid_size,
+                        polar_bbox_expansion=polar_bbox_expansion[s],
+                        polar_workspace_attend_action=polar_workspace_attend_action,
                     ),
                     name=f"block{i}",
                 )
@@ -755,6 +901,9 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                     "feat": point.feat,
                     "coord": point.coord,
                     "batch": point.batch,
+                    **({name: point[name] for name in (
+                        "image_support", "input_to_stage", "input_image_support", "input_point_batch"
+                    )} if "image_support" in point else {}),
                 })
             point.fused_stage_points = tuple(stage_points)
         else:

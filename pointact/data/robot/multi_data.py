@@ -200,6 +200,7 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             "augment_point_color": {},
             "point_feature_mode": {},
             "polar_feature_normalization": {},
+            "use_point_image_support": {},
             "material_candidates": {},
             "vlm_image_mode": {},
         }
@@ -212,6 +213,7 @@ class MultiLeRobotDataset(BaseMultiLeRobotDataset):
             robot_config["augment_point_color"][repo_id] = data_config.augment_point_color
             robot_config["point_feature_mode"][repo_id] = data_config.point_feature_mode
             robot_config["polar_feature_normalization"][repo_id] = data_config.polar_feature_normalization
+            robot_config["use_point_image_support"][repo_id] = data_config.use_point_image_support
             robot_config["vlm_image_mode"][repo_id] = data_config.vlm_image_mode
             if data_config.material_profiles_file is not None:
                 from pointact.data.polar_material import load_material_candidates

@@ -59,3 +59,23 @@ def test_group_leakage_and_invalid_gt_source_are_rejected(tmp_path):
         assert_disjoint_groups(train, val)
     with pytest.raises(ValueError, match="invalid supervision source"):
         PolarNormalDataset(first, normal_gt_source="damaged_depth_normals")
+
+
+def test_ray_dropout_zeros_only_observation_rays(tmp_path):
+    sample_path = tmp_path / "sample.npz"
+    manifest_path = tmp_path / "manifest.json"
+    make_record(sample_path)
+    write_manifest(manifest_path, sample_path, "object-a")
+    common = dict(input_mode="native_cga", image_size=32, normal_gt_source="public_dataset_gt")
+    retained = PolarNormalDataset(manifest_path, ray_dropout_prob=0.0, **common)[0]
+    dropped = PolarNormalDataset(manifest_path, ray_dropout_prob=1.0, **common)[0]
+    assert retained["polar_observation"][-3:].abs().sum() > 0
+    assert dropped["polar_observation"][-3:].count_nonzero() == 0
+    np.testing.assert_array_equal(
+        dropped["polar_observation"][:-3], retained["polar_observation"][:-3]
+    )
+    np.testing.assert_array_equal(dropped["physical_prior"], retained["physical_prior"])
+    np.testing.assert_array_equal(dropped["normal_gt"], retained["normal_gt"])
+    np.testing.assert_array_equal(dropped["normal_valid_mask"], retained["normal_valid_mask"])
+    with pytest.raises(ValueError, match="ray_dropout_prob"):
+        PolarNormalDataset(manifest_path, ray_dropout_prob=1.1, **common)

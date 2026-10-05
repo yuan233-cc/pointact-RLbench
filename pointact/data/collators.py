@@ -120,8 +120,6 @@ class DataCollator(DefaultDataCollator):
                 raise ValueError("Cannot mix material-conditioned and plain examples in one batch")
             data_dict["material_rgb"] = torch.stack([example["material_rgb"] for example in examples])
             data_dict["polar_dense"] = torch.stack([example["polar_dense"] for example in examples])
-            data_dict["point_pixel_indices"] = torch.cat(
-                [example["point_pixel_indices"] for example in examples])
             candidate_counts = [len(example["material_candidates"]) for example in examples]
             max_candidates = max(candidate_counts)
             feature_size = examples[0]["material_candidates"].shape[-1]
@@ -135,13 +133,24 @@ class DataCollator(DefaultDataCollator):
             data_dict["material_candidates"] = candidates
             data_dict["material_candidate_mask"] = mask
 
+        has_point_pixels = ["point_pixel_indices" in example for example in examples]
+        if any(has_point_pixels):
+            if not all(has_point_pixels):
+                raise ValueError("Cannot mix samples with and without point pixel correspondence")
+            for example in examples:
+                if example["point_pixel_indices"].shape != (len(example["points"]),):
+                    raise ValueError("Pixel IDs must match final point rows before concatenation")
+            data_dict["point_pixel_indices"] = torch.cat([
+                example["point_pixel_indices"].long() for example in examples
+            ])
+
         has_polar = ["polar_images" in example for example in examples]
         if any(has_polar) and not all(has_polar):
             raise ValueError("Cannot mix Polar-token and baseline examples in one batch")
         if all(has_polar):
             required = ("polar_images", "polar_K", "T_camera_from_model", "view_valid")
             optional = (
-                "T_model_from_world", "pixel_valid", "polar_pixel_transform",
+                "T_model_from_world", "pixel_valid", "polar_workspace_mask", "polar_pixel_transform", "point_pixel_image_hw",
                 "polar_rgb", "polar_physical_prior",
             )
             for key in required:

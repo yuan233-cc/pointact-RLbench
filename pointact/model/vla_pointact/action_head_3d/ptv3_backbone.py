@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from .polar_bbox_fusion import image_support_from_pixels
+
 
 def _supports_flash_attention():
     """FlashAttention kernels require an Ampere-or-newer CUDA device."""
@@ -144,6 +146,11 @@ class PointTransformerUnetWithAction(nn.Module):
         polar_max_tokens_per_group=32,
         polar_max_views=8,
         polar_token_mode="local",
+        polar_fusion_mode="projection",
+        polar_bbox_grid_size=4,
+        polar_bbox_expansion=(1.0,) * 5,
+        polar_bbox_feature_levels=(0, 0, 1, 2, 2),
+        polar_workspace_attend_action=False,
     ):
         super().__init__()
 
@@ -184,6 +191,11 @@ class PointTransformerUnetWithAction(nn.Module):
             polar_max_tokens_per_group=polar_max_tokens_per_group,
             polar_max_views=polar_max_views,
             polar_token_mode=polar_token_mode,
+            polar_fusion_mode=polar_fusion_mode,
+            polar_bbox_grid_size=polar_bbox_grid_size,
+            polar_bbox_expansion=polar_bbox_expansion,
+            polar_bbox_feature_levels=polar_bbox_feature_levels,
+            polar_workspace_attend_action=polar_workspace_attend_action,
         )
         self.auxiliary_decoder = auxiliary_decoder
         self.enc_channels = enc_channels
@@ -193,6 +205,7 @@ class PointTransformerUnetWithAction(nn.Module):
             self.output_size = dec_channels[0]
         self.voxel_size = voxel_size
         self.polar_enabled = polar_enabled
+        self.polar_fusion_mode = polar_fusion_mode
 
     def prepare_ptv3_batch(
         self, pc_fts, npoints_in_batch, ctx_embeds, ctx_lens, action_feat, 
@@ -235,6 +248,22 @@ class PointTransformerUnetWithAction(nn.Module):
             if missing:
                 raise ValueError(f"Polar context is missing {missing}")
             outs.update(polar_context)
+            if self.polar_fusion_mode in ("bbox", "workspace"):
+                pixels = polar_context.get("point_pixel_indices")
+                if pixels is None:
+                    raise ValueError("BBox fusion requires final input point_pixel_indices")
+                support = image_support_from_pixels(
+                    pixels, outs['batch'], polar_context["polar_image_hw"],
+                    polar_context.get("polar_pixel_transform"),
+                    polar_context.get("point_pixel_image_hw"),
+                )
+                outs["image_support"] = support
+                outs["input_image_support"] = support
+                outs["input_point_batch"] = outs['batch']
+                outs["input_to_stage"] = torch.arange(len(pc_fts), device=pc_fts.device)
+            if self.polar_fusion_mode == "workspace":
+                if "polar_workspace_mask" not in polar_context:
+                    raise ValueError("Workspace fusion requires polar_workspace_mask")
         elif polar_context is not None:
             raise ValueError("polar_context was provided while polar_enabled=False")
 
@@ -265,6 +294,8 @@ class PointTransformerUnetWithAction(nn.Module):
         else:
             point_outs = self.ptv3_model(ptv3_batch)
         self.last_polar_route_stats = point_outs.get("polar_route_stats", None)
+        polar_group_output = point_outs.get("polar_group_output", None)
+        self.last_polar_group_output = None if polar_group_output is None else polar_group_output.detach()
 
         action_out_embeds = point_outs.action_feat
         

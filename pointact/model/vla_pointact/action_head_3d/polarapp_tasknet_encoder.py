@@ -202,6 +202,9 @@ class PolarAppTaskAwareEncoder(nn.Module):
 
     feature_strides = (1, 2, 4, 8, 16)
     feature_offsets = (0.0, 0.0, 0.0, 0.0, 0.0)
+    task_feature_channels = (96, 96, 192)
+    task_feature_strides = (1, 2, 4)
+    task_feature_offsets = (0.0, 0.0, 0.0)
 
     def __init__(
         self,
@@ -222,6 +225,7 @@ class PolarAppTaskAwareEncoder(nn.Module):
             raise ValueError("PolarAPP TaskNet requires three block/head stages")
         self.input_mode = input_mode
         self.pyramid_channels = pyramid_channels
+        self.task_feature_channels = (dim * 2, dim * 2, dim * 4)
         self.feature_channels = (pyramid_channels,) * 5
 
         # Keep the released TaskNet names so its checkpoint can be loaded without

@@ -17,16 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pointact.data.polar_normal_sources import (  # noqa: E402
     ambiguous_normals,
     build_cga_record,
-    face_forward_normals,
+    normals_from_depth,
     polarization_observation,
     stack_analyzers,
-    viewing_directions,
-)
-
-
-HAMMER_K = np.asarray(
-    [[706.7553100585938, 0.0, 545.632681932806], [0.0, 707.5133056640625, 389.9299663507045], [0.0, 0.0, 1.0]],
-    dtype=np.float32,
 )
 
 
@@ -70,12 +63,34 @@ def prepare_rlbench(args: argparse.Namespace) -> None:
     skipped = []
     for source in sources:
         with np.load(source, allow_pickle=False) as data:
-            required = ("I0", "I45", "I90", "I135", "normal_gt", "normal_valid_mask", "K")
+            required = (
+                "I0", "I45", "I90", "I135", "normal_gt", "normal_valid_mask", "K", "depth_z"
+            )
             missing = [key for key in required if key not in data]
             if missing:
                 skipped.append({"path": str(source), "missing": missing})
                 continue
-            mask = np.asarray(data["normal_valid_mask"], dtype=bool)
+            camera_k = np.asarray(data["K"], dtype=np.float32).copy()
+            if camera_k.shape != (3, 3) or not np.isfinite(camera_k).all():
+                raise ValueError(f"Invalid RLBench camera intrinsics in {source}")
+            if camera_k[0, 0] >= 0 or camera_k[1, 1] >= 0:
+                raise ValueError(f"Expected the source RLBench/Mitsuba negative focal convention: {source}")
+            camera_k[0, 0] = abs(camera_k[0, 0])
+            camera_k[1, 1] = abs(camera_k[1, 1])
+            normal_gt = np.asarray(data["normal_gt"], dtype=np.float32).copy()
+            normal_gt[..., :2] *= -1.0
+            depth_normal, depth_mask = normals_from_depth(
+                data["depth_z"],
+                camera_k,
+                relative_edge_threshold=0.01,
+                absolute_edge_threshold=0.003,
+            )
+            agreement = np.sum(normal_gt * depth_normal, axis=-1)
+            mask = (
+                np.asarray(data["normal_valid_mask"], dtype=bool)
+                & depth_mask
+                & (agreement >= np.cos(np.deg2rad(args.max_geometry_angle)))
+            )
             analyzers = stack_analyzers(
                 [data["I0"], data["I45"], data["I90"], data["I135"]],
                 normalization="percentile",
@@ -83,9 +98,9 @@ def prepare_rlbench(args: argparse.Namespace) -> None:
             )
             record = build_cga_record(
                 analyzers,
-                np.asarray(data["normal_gt"], dtype=np.float32),
+                normal_gt,
                 mask,
-                camera_k=data["K"],
+                camera_k=camera_k,
                 refractive_index=args.refractive_index,
             )
         destination = args.output / f"{len(entries):06d}_{source.parent.name}.npz"
@@ -112,6 +127,10 @@ def prepare_rlbench(args: argparse.Namespace) -> None:
             "adapter": "rlbench_mitsuba",
             "source": str(args.input_root.resolve()),
             "coordinate_frame": "+x right, +y down, +z forward; normals face camera",
+            "source_normal_xy_to_camera": [-1, -1],
+            "source_negative_focal_to_camera": "take positive fx and fy",
+            "normal_aov_depth_consistency_degrees": args.max_geometry_angle,
+            "normal_supervision": "Mitsuba shading-normal AOV after camera-axis conversion and clean-depth geometry check",
             "analyzer_order_degrees": [0, 45, 90, 135],
             "refractive_index": args.refractive_index,
             "records": len(entries),
@@ -141,8 +160,8 @@ def parse_hammer_layout(value: str) -> tuple[int, int, int, int]:
 def hammer_sources(input_root: Path) -> list[Path]:
     return sorted(
         path
-        for path in input_root.glob("scene*_traj*/pol/*.png")
-        if "naked" not in path.parent.parent.name
+        for path in input_root.glob("scene*_traj*/polarization/pol/*.png")
+        if "naked" not in path.parents[2].name
     )
 
 
@@ -164,29 +183,54 @@ def order_hammer_analyzers(quadrants: list[np.ndarray], layout: tuple[int, ...])
     return [by_angle[angle] for angle in (0, 45, 90, 135)]
 
 
-def hammer_supervision(pol_path: Path) -> tuple[np.ndarray, np.ndarray]:
-    sequence = pol_path.parent.parent
-    normal_path = sequence / "norm" / pol_path.name
-    depth_path = sequence / "_gt" / pol_path.name
-    if not normal_path.is_file():
-        raise FileNotFoundError(f"Missing HAMMER normal image: {normal_path}")
-    normal_image = read_rgb(normal_path)
-    if not np.issubdtype(normal_image.dtype, np.integer):
-        raise TypeError(f"Expected integer-encoded HAMMER normal image: {normal_path}")
-    normal = normal_image.astype(np.float32) / float(np.iinfo(normal_image.dtype).max)
-    normal = normal * 2.0 - 1.0
-    if depth_path.is_file():
-        depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
-        if depth is None:
-            raise OSError(f"Failed to read {depth_path}")
-        mask = depth[..., 0] > 0 if depth.ndim == 3 else depth > 0
+def hammer_intrinsics(pol_path: Path) -> np.ndarray:
+    path = pol_path.parent.parent / "intrinsics.txt"
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing HAMMER polarization intrinsics: {path}")
+    values = np.loadtxt(path, dtype=np.float32)
+    if values.shape == (3, 3):
+        camera_k = values
+    elif values.size == 4:
+        fx, fy, cx, cy = values.reshape(-1)
+        camera_k = np.asarray([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
     else:
-        mask = np.isfinite(normal).all(axis=-1) & (np.linalg.norm(normal, axis=-1) > 0.25)
-    return normal, mask
+        raise ValueError(f"Unsupported HAMMER intrinsics shape {values.shape}: {path}")
+    if not np.isfinite(camera_k).all() or camera_k[0, 0] <= 0 or camera_k[1, 1] <= 0:
+        raise ValueError(f"Invalid HAMMER intrinsics: {path}")
+    return camera_k.astype(np.float32)
+
+
+def hammer_supervision(pol_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    polarization = pol_path.parent.parent
+    depth_path = polarization / "_gt" / pol_path.name
+    if not depth_path.is_file():
+        raise FileNotFoundError(f"Missing HAMMER clean GT depth image: {depth_path}")
+    depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+    if depth is None:
+        raise OSError(f"Failed to read {depth_path}")
+    if depth.ndim == 3:
+        depth = depth[..., 0]
+    camera_k = hammer_intrinsics(pol_path)
+    normal, mask = normals_from_depth(depth, camera_k, depth_scale=0.001)
+    return normal, mask, camera_k
+
+
+def strided_camera_intrinsics(camera_k: np.ndarray, stride: int) -> np.ndarray:
+    """Keep rays aligned with source pixel centers selected at 0, stride, 2*stride, ..."""
+    if stride <= 0:
+        raise ValueError("stride must be positive")
+    result = np.asarray(camera_k, dtype=np.float32).copy()
+    result[0] /= stride
+    result[1] /= stride
+    result[0, 2] += 0.5 - 0.5 / stride
+    result[1, 2] += 0.5 - 0.5 / stride
+    return result
 
 
 def hammer_group(pol_path: Path) -> str:
-    return "hammer_" + pol_path.parent.parent.name
+    # Different trajectories of the same scene share geometry and must not
+    # cross the train/validation boundary.
+    return "hammer_" + pol_path.parents[2].name.split("_", 1)[0]
 
 
 def select_per_group(sources: list[Path], maximum: int | None) -> list[Path]:
@@ -208,15 +252,23 @@ def prepare_hammer(args: argparse.Namespace) -> None:
     if args.limit is not None:
         sources = sources[: args.limit]
     if not sources:
-        raise ValueError(f"No non-naked scene*_traj*/pol/*.png files below {args.input_root}")
+        raise ValueError(
+            f"No non-naked scene*_traj*/polarization/pol/*.png files below {args.input_root}"
+        )
     args.output.mkdir(parents=True, exist_ok=False)
     entries = []
     for source in sources:
+        quadrants = hammer_quadrants(source)
+        normal, mask, camera_k = hammer_supervision(source)
+        if args.spatial_stride > 1:
+            quadrants = [image[:: args.spatial_stride, :: args.spatial_stride] for image in quadrants]
+            normal = normal[:: args.spatial_stride, :: args.spatial_stride]
+            mask = mask[:: args.spatial_stride, :: args.spatial_stride]
+            camera_k = strided_camera_intrinsics(camera_k, args.spatial_stride)
         analyzers = stack_analyzers(
-            order_hammer_analyzers(hammer_quadrants(source), args.quadrant_layout),
+            order_hammer_analyzers(quadrants, args.quadrant_layout),
             normalization="dtype",
         )
-        normal, mask = hammer_supervision(source)
         if normal.shape[:2] != analyzers.shape[1:3] or mask.shape != analyzers.shape[1:3]:
             raise ValueError(
                 f"HAMMER modalities are not aligned for {source}: "
@@ -226,7 +278,7 @@ def prepare_hammer(args: argparse.Namespace) -> None:
             analyzers,
             normal,
             mask,
-            camera_k=HAMMER_K,
+            camera_k=camera_k,
             refractive_index=args.refractive_index,
         )
         destination = args.output / f"{len(entries):06d}_{source.stem}.npz"
@@ -249,7 +301,9 @@ def prepare_hammer(args: argparse.Namespace) -> None:
             "quadrant_positions": ["top_left", "top_right", "bottom_left", "bottom_right"],
             "quadrant_layout_degrees": list(args.quadrant_layout),
             "layout_status": "explicitly selected after empirical calibration",
-            "normal_decode": "RGB image / dtype_max * 2 - 1, then face-forward",
+            "normal_supervision": "centered finite-difference normals from clean _gt depth",
+            "depth_scale_to_meters": 0.001,
+            "spatial_stride": args.spatial_stride,
             "refractive_index": args.refractive_index,
             "max_per_group": args.max_per_group,
             "records": len(entries),
@@ -264,10 +318,12 @@ def calibrate_hammer(args: argparse.Namespace) -> None:
         raise ValueError(f"No HAMMER samples below {args.input_root}")
     samples = []
     for source in sources:
-        normal, mask = hammer_supervision(source)
+        normal, mask, _ = hammer_supervision(source)
         quadrants = hammer_quadrants(source)
-        viewing = viewing_directions(normal.shape[0], normal.shape[1], HAMMER_K)
-        normal, mask = face_forward_normals(normal, viewing, mask)
+        if args.stride > 1:
+            normal = normal[:: args.stride, :: args.stride]
+            mask = mask[:: args.stride, :: args.stride]
+            quadrants = [image[:: args.stride, :: args.stride] for image in quadrants]
         samples.append((source, quadrants, normal, mask))
     scores = []
     for layout in itertools.permutations((0, 45, 90, 135)):
@@ -327,22 +383,30 @@ def prepare_sfpuel(args: argparse.Namespace) -> None:
         missing = [path for path in (*paths.values(), normal_path, mask_path) if not path.is_file()]
         if missing:
             raise FileNotFoundError(f"Incomplete SfPUEL sample {name}: {missing}")
-        analyzers = stack_analyzers(
-            [read_rgb(paths[angle]) for angle in ("000", "045", "090", "135")],
-            normalization="dtype",
-        )
+        analyzer_images = [read_rgb(paths[angle]) for angle in ("000", "045", "090", "135")]
         normal_image = read_rgb(normal_path)
         if not np.issubdtype(normal_image.dtype, np.integer):
             raise TypeError(f"Expected integer-encoded SfPUEL normal image: {normal_path}")
         normal = normal_image.astype(np.float32) / float(np.iinfo(normal_image.dtype).max)
         normal = normal * 2.0 - 1.0
+        # SfPUEL's PNG uses image-right x, image-up y, and camera-facing +z.
+        # Convert to image-right x, image-down y, and forward +z.
+        normal[..., 1:] *= -1.0
         mask_image = read_rgb(mask_path)
         mask = mask_image[..., 0] > 0 if mask_image.ndim == 3 else mask_image > 0
+        if args.spatial_stride > 1:
+            analyzer_images = [
+                image[:: args.spatial_stride, :: args.spatial_stride] for image in analyzer_images
+            ]
+            normal = normal[:: args.spatial_stride, :: args.spatial_stride]
+            mask = mask[:: args.spatial_stride, :: args.spatial_stride]
+        analyzers = stack_analyzers(analyzer_images, normalization="dtype")
         record = build_cga_record(
             analyzers,
             normal,
             mask,
             refractive_index=args.refractive_index,
+            normal_orientation="optical_axis",
         )
         destination = args.output / f"{len(entries):06d}_{pol000.stem}.npz"
         write_record(destination, record, dataset_id="sfpuel", source_id=str(pol000))
@@ -362,10 +426,12 @@ def prepare_sfpuel(args: argparse.Namespace) -> None:
             "source": str(args.input_root.resolve()),
             "coordinate_frame": "+x right, +y down, +z forward; normals face camera",
             "analyzer_order_degrees": [0, 45, 90, 135],
-            "normal_decode": "official RGB image / dtype_max * 2 - 1, then face-forward",
+            "normal_decode": "official RGB image / dtype_max * 2 - 1; (x,y,z) to (x,-y,-z)",
+            "normal_orientation": "optical axis because camera intrinsics are unavailable",
             "refractive_index": args.refractive_index,
             "group_prefix_components": args.group_prefix_components,
             "max_per_group": args.max_per_group,
+            "spatial_stride": args.spatial_stride,
             "records": len(entries),
         },
     )
@@ -384,11 +450,13 @@ def main() -> None:
     rlbench = subparsers.add_parser("rlbench")
     add_common(rlbench)
     rlbench.add_argument("--group", required=True, help="Complete RLBench task/episode/seed group")
+    rlbench.add_argument("--max-geometry-angle", type=float, default=15.0)
     rlbench.set_defaults(function=prepare_rlbench)
     sfpuel = subparsers.add_parser("sfpuel")
     add_common(sfpuel)
     sfpuel.add_argument("--group-prefix-components", type=int, default=1)
     sfpuel.add_argument("--max-per-group", type=int)
+    sfpuel.add_argument("--spatial-stride", type=int, default=1)
     sfpuel.set_defaults(function=prepare_sfpuel)
     hammer = subparsers.add_parser("hammer")
     add_common(hammer)
@@ -399,12 +467,14 @@ def main() -> None:
         help="Angles at top-left,top-right,bottom-left,bottom-right, e.g. 0,45,90,135",
     )
     hammer.add_argument("--max-per-group", type=int)
+    hammer.add_argument("--spatial-stride", type=int, default=4)
     hammer.set_defaults(function=prepare_hammer)
     hammer_calibrate = subparsers.add_parser("hammer-calibrate")
     hammer_calibrate.add_argument("--input-root", type=Path, required=True)
     hammer_calibrate.add_argument("--limit", type=int, default=8)
     hammer_calibrate.add_argument("--max-per-group", type=int, default=1)
     hammer_calibrate.add_argument("--minimum-dolp", type=float, default=0.02)
+    hammer_calibrate.add_argument("--stride", type=int, default=4)
     hammer_calibrate.add_argument("--refractive-index", type=float, default=1.5)
     hammer_calibrate.set_defaults(function=calibrate_hammer)
     args = parser.parse_args()
@@ -412,12 +482,18 @@ def main() -> None:
         parser.error("--limit must be positive")
     if args.refractive_index <= 1.0:
         parser.error("--refractive-index must be greater than one")
+    if getattr(args, "max_geometry_angle", 1.0) <= 0.0 or getattr(args, "max_geometry_angle", 1.0) > 180.0:
+        parser.error("--max-geometry-angle must be in (0, 180]")
     if getattr(args, "group_prefix_components", 1) <= 0:
         parser.error("--group-prefix-components must be positive")
     if getattr(args, "max_per_group", None) is not None and args.max_per_group <= 0:
         parser.error("--max-per-group must be positive")
     if not 0.0 <= getattr(args, "minimum_dolp", 0.0) <= 1.0:
         parser.error("--minimum-dolp must be between zero and one")
+    if getattr(args, "stride", 1) <= 0:
+        parser.error("--stride must be positive")
+    if getattr(args, "spatial_stride", 1) <= 0:
+        parser.error("--spatial-stride must be positive")
     args.function(args)
 
 

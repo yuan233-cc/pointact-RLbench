@@ -19,6 +19,9 @@ from .model import (
 from .model_ca import CABlock, PointTransformerV3CA
 from .utils import offset2bincount
 from pointact.model.vla_pointact.action_head_3d.polar_router import PolarTokenRouter
+from pointact.model.vla_pointact.action_head_3d.polar_bbox_fusion import (
+    BboxPolarSampler, forward_bbox_joint_attention,
+)
 
 
 class GridPoolingWithAction(GridPooling):
@@ -35,6 +38,9 @@ class GridPoolingWithAction(GridPooling):
         "polar_feature_strides",
         "polar_feature_offsets",
         "polar_route_stats",
+        "polar_bbox_feature_bank",
+        "polar_bbox_bank_strides",
+        "polar_bbox_bank_offsets",
     )
 
     def __init__(self, in_channels, out_channels, **kwargs):
@@ -114,14 +120,21 @@ class SerializedAttentionWithAction(SerializedAttention):
         max_tokens=32,
         max_views=8,
         token_mode="local",
+        fusion_mode="projection",
+        bbox_grid_size=4,
+        bbox_expansion=1.0,
     ):
+        if fusion_mode == "bbox" and self.enable_rpe:
+            raise ValueError("BBox joint attention is incompatible with pure-point RPE")
         self.polar_enabled = True
-        self.polar_router = PolarTokenRouter(
-            level=stage_index,
-            neighbor_radius=neighbor_radius,
-            max_tokens=max_tokens,
-            mode=token_mode,
-        )
+        self.polar_fusion_mode = fusion_mode
+        if fusion_mode == "bbox":
+            self.polar_bbox_sampler = BboxPolarSampler(stage_index, bbox_grid_size, bbox_expansion)
+        else:
+            self.polar_router = PolarTokenRouter(
+                level=stage_index, neighbor_radius=neighbor_radius,
+                max_tokens=max_tokens, mode=token_mode,
+            )
         self.polar_norm = nn.LayerNorm(self.channels)
         self.polar_position = nn.Linear(2, self.channels)
         self.polar_view_embedding = nn.Embedding(max_views, self.channels)
@@ -149,6 +162,12 @@ class SerializedAttentionWithAction(SerializedAttention):
         return (attn @ v).transpose(0, 1).reshape(-1, self.channels)
 
     def _forward_polar(self, point):
+        if self.polar_fusion_mode == "bbox":
+            return forward_bbox_joint_attention(
+                self, point,
+                flash_function=(flash_attn.flash_attn_varlen_qkvpacked_func if flash_attn is not None else None),
+                point_rope=getattr(self, "rope", None),
+            )
         bincount = offset2bincount(point.offset)
         if not self.enable_flash:
             self.patch_size = min(bincount.min().tolist(), self.patch_size_max)
@@ -401,6 +420,9 @@ class BlockWithAction(Block):
         polar_max_tokens=32,
         polar_max_views=8,
         polar_token_mode="local",
+        polar_fusion_mode="projection",
+        polar_bbox_grid_size=4,
+        polar_bbox_expansion=1.0,
     ):
         super().__init__(
             channels=channels,
@@ -435,6 +457,9 @@ class BlockWithAction(Block):
                 max_tokens=polar_max_tokens,
                 max_views=polar_max_views,
                 token_mode=polar_token_mode,
+                fusion_mode=polar_fusion_mode,
+                bbox_grid_size=polar_bbox_grid_size,
+                bbox_expansion=polar_bbox_expansion,
             )
 
         self.action_proj = nn.Linear(channels, channels)
@@ -551,22 +576,39 @@ class CABlockWithAction(CABlock):
 
 
 class PolarStagePreparation(PointModule):
-    """Project one SfP feature level once for all attention blocks in a stage."""
+    """Share one stage bank/adapter; bbox mode projects only sampled tokens."""
 
-    def __init__(self, input_channels, output_channels, stage_index):
+    def __init__(self, input_channels, output_channels, stage_index, bbox_feature_level=None):
         super().__init__()
         self.stage_index = stage_index
+        self.bbox_feature_level = bbox_feature_level
         self.adapter = nn.Linear(input_channels, output_channels)
         self.norm = nn.LayerNorm(output_channels)
 
     def forward(self, point):
-        levels = point.polar_feature_levels
-        if len(levels) != 5:
-            raise ValueError("polar_feature_levels must contain x1..x5")
-        feature = levels[self.stage_index]
+        if self.bbox_feature_level is None:
+            levels = point.polar_feature_levels
+            if len(levels) != 5:
+                raise ValueError("polar_feature_levels must contain x1..x5")
+            feature = levels[self.stage_index]
+        else:
+            levels = point.polar_bbox_feature_bank
+            if len(levels) != 3:
+                raise ValueError("BBox fusion requires the three full-image TaskNet TaF maps")
+            feature = levels[self.bbox_feature_level]
+            point.polar_bbox_geometry = (
+                point.polar_bbox_bank_strides[self.bbox_feature_level],
+                point.polar_bbox_bank_offsets[self.bbox_feature_level],
+            )
         if feature.ndim != 5:
             raise ValueError("Each Polar feature level must be [B,V,C,H,W]")
         feature = feature.permute(0, 1, 3, 4, 2)
+        if self.bbox_feature_level is not None:
+            # Keep the full bank in native channels and adapt sampled tokens.
+            point.polar_features = feature
+            point.polar_bbox_adapter = self.adapter
+            point.polar_bbox_norm = self.norm
+            return point
         point.polar_features = self.norm(self.adapter(feature))
         return point
 
@@ -615,6 +657,11 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
         polar_max_tokens_per_group=32,
         polar_max_views=8,
         polar_token_mode="local",
+        polar_fusion_mode="projection",
+        polar_bbox_grid_size=4,
+        polar_bbox_expansion=(1.0,) * 5,
+        polar_bbox_feature_levels=(0, 0, 1, 2, 2),
+        polar_workspace_attend_action=False,
     ):
         PointModule.__init__(self)
 
@@ -677,6 +724,7 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         input_channels=sfp_feature_channels[s],
                         output_channels=enc_channels[s],
                         stage_index=s,
+                        bbox_feature_level=(polar_bbox_feature_levels[s] if polar_fusion_mode == "bbox" else None),
                     ),
                     name="polar_prepare",
                 )
@@ -712,6 +760,9 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         polar_max_tokens=polar_max_tokens_per_group,
                         polar_max_views=polar_max_views,
                         polar_token_mode=polar_token_mode,
+                        polar_fusion_mode=polar_fusion_mode,
+                        polar_bbox_grid_size=polar_bbox_grid_size,
+                        polar_bbox_expansion=polar_bbox_expansion[s],
                     ),
                     name=f"block{i}",
                 )
@@ -835,6 +886,9 @@ class PointTransformerV3CAWithAction(PointTransformerV3CA):
                         "feat": point.feat,
                         "coord": point.coord,
                         "batch": point.batch,
+                        **({name: point[name] for name in (
+                            "image_support", "input_to_stage", "input_image_support", "input_point_batch"
+                        )} if "image_support" in point else {}),
                     }
                 )
             point.fused_stage_points = tuple(stage_points)

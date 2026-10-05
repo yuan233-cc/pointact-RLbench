@@ -1,0 +1,39 @@
+data:
+  input_mode: native_cga
+  image_size: 256
+  require_calibration: true
+  datasets:
+    - name: hammer
+      ray_dropout_train: 0.15
+      train_manifest: /nfs/aachen/weihangli/datasets/PolarNormalCGA_20261003_v1/hammer/train_manifest.json
+      val_manifest: /nfs/aachen/weihangli/datasets/PolarNormalCGA_20261003_v1/hammer/val_manifest.json
+      normal_gt_source: HAMMER clean polarization-camera GT depth normals
+    - name: sfpuel
+      ray_dropout_train: 1.0
+      ray_dropout_val: 1.0
+      train_manifest: /nfs/aachen/weihangli/datasets/PolarNormalCGA_20261003_v1/sfpuel/train_manifest.json
+      val_manifest: /nfs/aachen/weihangli/datasets/PolarNormalCGA_20261003_v1/sfpuel/val_manifest.json
+      normal_gt_source: SfPUEL public surface-normal GT
+    - name: rlbench_polar_v2_10tasks_offline
+      ray_dropout_train: 0.15
+      train_manifest: /nfs/aachen/weihangli/datasets/RLBenchPolarNormal10TasksV2_CGAOffline_20261004/train_manifest.json
+      val_manifest: /nfs/aachen/weihangli/datasets/RLBenchPolarNormal10TasksV2_CGAOffline_20261004/val_manifest.json
+      normal_gt_source: archived Coppelia depth + same-object mask finite-difference normals
+
+model:
+  use_dino: true
+  transformer_blocks: 8
+  transformer_dropout: 0.0
+  dinov3_weights: /nfs/aachen/weihangli/checkpoints/pretrained/dinov3_convnext_base_lvd1689m/dinov3_convnext_base_pretrain_lvd1689m.pth
+
+training:
+  output_dir: /nfs/aachen/weihangli/checkpoints/cga_dinov3_mixed_10tasks_v2_offline
+  seed: 7
+  device: cuda
+  epochs: 30
+  batch_size: 2
+  gradient_accumulation_steps: 4
+  num_workers: 4
+  learning_rate: 1.0e-4
+  step_size: 10
+  gamma: 0.5

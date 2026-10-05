@@ -26,6 +26,8 @@ def test_sfp_sidecar_assembles_official_seven_channels():
 
     dataset = object.__new__(LeRobotPointCloudDataset)
     dataset.sfp_input_dir = "unused"
+    dataset.use_point_image_support = False
+    dataset.points_workspace = None
     dataset._read_sidecar = lambda *_args: payload.getvalue()
     item = dataset._load_sfp_inputs(0, 0, dense)
 
@@ -46,6 +48,20 @@ def test_sfp_sidecar_assembles_official_seven_channels():
         torch.linalg.vector_norm(item["polar_images"][0, 4:7], dim=0),
         torch.ones(height, width),
     )
+
+
+def test_workspace_mask_depends_on_camera_rays_not_depth_validity():
+    dataset = object.__new__(LeRobotPointCloudDataset)
+    dataset.points_workspace = {
+        "X_BBOX": [-0.25, 0.25],
+        "Y_BBOX": [-0.25, 0.25],
+        "Z_BBOX": [1.0, 2.0],
+    }
+    K = np.asarray([[4.0, 0.0, 2.0], [0.0, 4.0, 2.0], [0.0, 0.0, 1.0]])
+    mask = dataset._workspace_ray_mask(K, np.eye(4), 5, 5)
+    assert mask.dtype == np.bool_
+    assert mask[2, 2]
+    assert not mask[0, 0]
 
 
 def test_sfp_view_direction_center_and_axes():

@@ -126,6 +126,7 @@ class PolarNormalDataset(Dataset):
         normal_gt_source: str | None = None,
         normal_transform: list[list[float]] | Tensor | None = None,
         normal_sign: float = 1.0,
+        ray_dropout_prob: float = 0.0,
         limit: int | None = None,
     ):
         if input_mode not in ("native_cga", "robot"):
@@ -154,6 +155,9 @@ class PolarNormalDataset(Dataset):
         if self.normal_transform.shape != (3, 3):
             raise ValueError("normal_transform must be 3x3")
         self.normal_sign = float(normal_sign)
+        self.ray_dropout_prob = float(ray_dropout_prob)
+        if not 0.0 <= self.ray_dropout_prob <= 1.0:
+            raise ValueError("ray_dropout_prob must be between 0 and 1")
 
     @property
     def groups(self) -> set[str]:
@@ -231,6 +235,11 @@ class PolarNormalDataset(Dataset):
         entry = self.entries[index]
         path = Path(entry["path"])
         record = _load_record(path)
+        return self._sample_from_record(record, entry, path)
+
+    def _sample_from_record(
+        self, record: Mapping[str, Any], entry: Mapping[str, Any], path: Path
+    ) -> dict[str, Any]:
         observation, physical_prior = self._branches(record)
         rgb_value = _first(record, ("rgb", "RGB", "color"), required=self.require_rgb)
         if rgb_value is None:
@@ -267,6 +276,10 @@ class PolarNormalDataset(Dataset):
         observation = F.interpolate(observation[None], size=size, mode="bilinear", align_corners=False)[0]
         physical_prior = F.interpolate(physical_prior[None], size=size, mode="bilinear", align_corners=False)[0]
         observation[-3:] = F.normalize(observation[-3:], dim=0, eps=1e-6)
+        if self.ray_dropout_prob == 1.0 or (
+            self.ray_dropout_prob > 0.0 and torch.rand(()).item() < self.ray_dropout_prob
+        ):
+            observation[-3:] = 0.0
         candidate_normals = physical_prior[:9].reshape(3, 3, *size)
         physical_prior[:9] = F.normalize(candidate_normals, dim=1, eps=1e-6).reshape(9, *size)
         if rgb.numel():
