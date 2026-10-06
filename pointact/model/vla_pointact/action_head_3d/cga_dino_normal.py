@@ -204,17 +204,19 @@ class CgaDinoNormalNet(nn.Module):
         physical_prior: Tensor,
         rgb: Tensor | None = None,
     ) -> dict[str, Tensor | tuple[Tensor, ...]]:
-        e1, e2, f3, f4, f5 = self._encode(polar_observation, physical_prior, rgb)
+        levels = self._encode(polar_observation, physical_prior, rgb)
+        normal, z1 = self.decode_normals(levels, return_dense=True)
+        return {"normal": normal, "feature_levels": levels, "dense_feature": z1}
+
+    def decode_normals(self, levels: tuple[Tensor, ...], return_dense: bool = False):
+        """Decode cached features without repeating the frozen DINO forward."""
+        e1, e2, f3, f4, f5 = levels
         z4 = self.up1(f5, f4)
         z3 = self.up2(z4, f3)
         z2 = self.up3(z3, e2)
         z1 = self.up4(z2, e1)
         normal = F.normalize(self.normal_head(z1), dim=1, eps=1e-6)
-        return {
-            "normal": normal,
-            "feature_levels": (e1, e2, f3, f4, f5),
-            "dense_feature": z1,
-        }
+        return (normal, z1) if return_dense else normal
 
     def trainable_state_dict(self) -> dict[str, Tensor]:
         """Return a compact checkpoint without the frozen DINO parameters."""

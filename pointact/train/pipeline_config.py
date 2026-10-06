@@ -91,6 +91,7 @@ class TrainPipelineConfig(TrainingArguments):
     polar_depth_loss_weight: float = field(default=0.1)
     polar_consistency_weight: float = field(default=1.0)
     sparse_depth_consistency_weight: float = field(default=1.0)
+    anchor_depth_consistency_weight: float = field(default=0.0)
     depth_smoothness_weight: float = field(default=0.01)
     polar_depth_keep_probability: float = field(default=0.7)
     polar_depth_min: float = field(default=0.05)

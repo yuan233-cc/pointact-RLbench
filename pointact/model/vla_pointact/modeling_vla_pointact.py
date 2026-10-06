@@ -39,6 +39,7 @@ from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision imp
     PolarDepthSelfSupervision,
     mask_points_at_depth_targets,
     rasterize_fused_point_features,
+    structured_depth_holdout,
 )
 from pointact.model.vla_pointact.polar_material_conditioner import PolarMaterialConditioner
 from pointact.model.vla_pointact.target_reconstruction import (
@@ -806,7 +807,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             sfp_feature_channels=(
                 tuple(PolarAppTaskAwareEncoder.task_feature_channels[level]
                       for level in self.config.polar_bbox_feature_levels)
-                if self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
+                if self.config.polar_backbone == "polarapp_taskaware" and self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
             ),
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
@@ -850,6 +851,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                 depth_keep_probability=self.config.polar_depth_keep_probability,
                 normal_weight=self.config.polar_consistency_weight,
                 sparse_depth_weight=self.config.sparse_depth_consistency_weight,
+                anchor_depth_weight=self.config.anchor_depth_consistency_weight,
                 smoothness_weight=self.config.depth_smoothness_weight,
                 use_polar_features=self.config.polar_fusion_mode != "workspace",
             )
@@ -1237,10 +1239,14 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
                             align_corners=False,
                         )
                         normal_targets = F.normalize(normal_targets, dim=1, eps=1e-6)
+            elif self.config.polar_backbone == "cga_dinov3_normal":
+                with torch.no_grad():
+                    normal_targets = self.cga_dino_encoder.decode_normals(tuple(
+                        level.detach().reshape(batch * views, *level.shape[2:])
+                        for level in polar_context["polar_feature_levels"]
+                    ))
             else:
-                raise RuntimeError(
-                    "The selected polar backbone does not provide normal targets"
-                )
+                raise RuntimeError("The selected polar backbone does not provide normal targets")
             normal_targets = normal_targets.reshape(
                 batch, views, *normal_targets.shape[1:]
             )
@@ -1275,6 +1281,7 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             compute_loss=compute_loss,
             depth_supervision_mask=depth_supervision_mask,
             normal_targets=normal_targets,
+            workspace_mask=polar_context.get("polar_workspace_mask"),
         )
 
     def to_float32_action_head(self):
@@ -1399,10 +1406,10 @@ class VLAEncDec3DWithActionClassificationModel(VLAEncDec3DBaseModel):
             observed_valid = kwargs.get("observed_depth_valid")
             if observed_valid is None:
                 raise ValueError("observed_depth_valid is required for masked completion")
-            random_keep = torch.rand_like(observed_valid.float()) < (
-                self.config.polar_depth_keep_probability
-            )
-            depth_supervision_mask = observed_valid.bool() & ~random_keep
+            valid = observed_valid.bool()
+            if "polar_workspace_mask" in polar_context:
+                valid = valid & polar_context["polar_workspace_mask"].unsqueeze(2)
+            depth_supervision_mask = structured_depth_holdout(valid, self.config.polar_depth_keep_probability)
             points, npoints_in_batch, point_keep = mask_points_at_depth_targets(
                 points=points,
                 npoints_in_batch=npoints_in_batch,
@@ -1539,7 +1546,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             sfp_feature_channels=(
                 tuple(PolarAppTaskAwareEncoder.task_feature_channels[level]
                       for level in self.config.polar_bbox_feature_levels)
-                if self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
+                if self.config.polar_backbone == "polarapp_taskaware" and self.config.polar_fusion_mode in ("bbox", "workspace") else polar_feature_channels
             ),
             polar_neighbor_radius=self.config.polar_neighbor_radius,
             polar_max_tokens_per_group=self.config.polar_max_tokens_per_group,
@@ -1596,6 +1603,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                 depth_keep_probability=self.config.polar_depth_keep_probability,
                 normal_weight=self.config.polar_consistency_weight,
                 sparse_depth_weight=self.config.sparse_depth_consistency_weight,
+                anchor_depth_weight=self.config.anchor_depth_consistency_weight,
                 smoothness_weight=self.config.depth_smoothness_weight,
                 use_polar_features=self.config.polar_fusion_mode != "workspace",
             )
@@ -1975,10 +1983,14 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
                             align_corners=False,
                         )
                         normal_targets = F.normalize(normal_targets, dim=1, eps=1e-6)
+            elif self.config.polar_backbone == "cga_dinov3_normal":
+                with torch.no_grad():
+                    normal_targets = self.cga_dino_encoder.decode_normals(tuple(
+                        level.detach().reshape(batch * views, *level.shape[2:])
+                        for level in polar_context["polar_feature_levels"]
+                    ))
             else:
-                raise RuntimeError(
-                    "The selected polar backbone does not provide normal targets"
-                )
+                raise RuntimeError("The selected polar backbone does not provide normal targets")
             normal_targets = normal_targets.reshape(
                 batch, views, *normal_targets.shape[1:]
             )
@@ -2013,6 +2025,7 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             compute_loss=compute_loss,
             depth_supervision_mask=depth_supervision_mask,
             normal_targets=normal_targets,
+            workspace_mask=polar_context.get("polar_workspace_mask"),
         )
 
     def compute_action_loss(
@@ -2098,10 +2111,10 @@ class VLAEncDec3DWithActionRegressionModel(VLAEncDec3DBaseModel):
             observed_valid = kwargs.get("observed_depth_valid")
             if observed_valid is None:
                 raise ValueError("observed_depth_valid is required for masked completion")
-            random_keep = torch.rand_like(observed_valid.float()) < (
-                self.config.polar_depth_keep_probability
-            )
-            depth_supervision_mask = observed_valid.bool() & ~random_keep
+            valid = observed_valid.bool()
+            if "polar_workspace_mask" in polar_context:
+                valid = valid & polar_context["polar_workspace_mask"].unsqueeze(2)
+            depth_supervision_mask = structured_depth_holdout(valid, self.config.polar_depth_keep_probability)
             points, npoints_in_batch, point_keep = mask_points_at_depth_targets(
                 points=points,
                 npoints_in_batch=npoints_in_batch,

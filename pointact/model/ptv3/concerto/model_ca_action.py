@@ -212,6 +212,8 @@ class SerializedAttentionWithAction(SerializedAttention):
         return point
 
     def forward(self, point):
+        if point.action_feat.shape[1] == 0:
+            return super().forward(point)
         if getattr(self, "polar_enabled", False) and self.polar_fusion_mode != "workspace":
             return self._forward_polar(point)
         bincount = offset2bincount(point.offset)
@@ -504,6 +506,8 @@ class CABlockWithAction(CABlock):
     def forward(self, point: Point):
         # point cross attention
         point = super().forward(point)
+        if point.action_feat.shape[1] == 0:
+            return point
     
         # action corss attention
         action_shortcut = point.action_feat
@@ -568,8 +572,8 @@ class PolarStagePreparation(PointModule):
             feature = levels[self.stage_index]
         else:
             levels = point.polar_bbox_feature_bank
-            if len(levels) != 3:
-                raise ValueError("BBox fusion requires the three full-image TaskNet TaF maps")
+            if len(levels) not in (3, 5):
+                raise ValueError("Image-space fusion requires three TaskNet or five CGA maps")
             feature = levels[self.bbox_feature_level]
             point.polar_bbox_geometry = (
                 point.polar_bbox_bank_strides[self.bbox_feature_level],

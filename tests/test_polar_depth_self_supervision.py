@@ -13,6 +13,32 @@ POLAR_CHANNELS = (8, 16, 24, 32, 32)
 POINT_CHANNELS = (6, 8, 12, 16, 20)
 
 
+def test_supplied_holdout_is_preserved_and_invalid_depth_does_not_poison_loss():
+    torch.manual_seed(1)
+    levels = _features()
+    point_levels, point_masks = _point_maps(requires_grad=True)
+    module = PolarDepthSelfSupervision(POLAR_CHANNELS, POINT_CHANNELS, anchor_depth_weight=.05).train()
+    depth = torch.ones(1, 1, 1, 32, 32)
+    depth[..., 0, 0] = float("nan")
+    valid = torch.isfinite(depth)
+    hidden = torch.zeros_like(valid)
+    hidden[..., 12:20, 12:20] = True
+    workspace = torch.zeros(1, 1, 32, 32, dtype=torch.bool)
+    workspace[..., 8:24, 8:24] = True
+    normal = torch.zeros(1, 1, 3, 32, 32)
+    normal[:, :, 2] = -1
+    k = torch.tensor([[[[100., 0, 16], [0, 100., 16], [0, 0, 1.]]]])
+    output = module(levels, point_levels, point_masks, torch.zeros(1, 1, 7, 32, 32), k,
+        depth, valid, normal_targets=normal, depth_supervision_mask=hidden, workspace_mask=workspace)
+    assert torch.isfinite(output["loss"])
+    error = torch.log(output["predicted_depth"])
+    expected = module._cauchy(error)[hidden].mean()
+    assert torch.allclose(output["holdout_depth_loss"], expected)
+    assert not output["anchor_weights"][..., :8, :].any()
+    output["loss"].backward()
+    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in module.parameters())
+
+
 def _features(batch=1, views=1, height=32, width=32):
     return tuple(
         torch.randn(batch, views, channel, height // (2 ** level), width // (2 ** level))

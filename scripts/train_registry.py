@@ -89,6 +89,7 @@ def _point_config_kwargs(training_args: TrainPipelineConfig) -> dict[str, Any]:
         "polar_depth_loss_weight": training_args.polar_depth_loss_weight,
         "polar_consistency_weight": training_args.polar_consistency_weight,
         "sparse_depth_consistency_weight": training_args.sparse_depth_consistency_weight,
+        "anchor_depth_consistency_weight": training_args.anchor_depth_consistency_weight,
         "depth_smoothness_weight": training_args.depth_smoothness_weight,
         "polar_depth_keep_probability": training_args.polar_depth_keep_probability,
         "polar_depth_min": training_args.polar_depth_min,

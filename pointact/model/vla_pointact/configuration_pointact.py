@@ -74,6 +74,7 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         polar_depth_loss_weight=0.1,
         polar_consistency_weight=1.0,
         sparse_depth_consistency_weight=1.0,
+        anchor_depth_consistency_weight=0.0,
         depth_smoothness_weight=0.01,
         polar_depth_keep_probability=0.7,
         polar_depth_min=0.05,
@@ -184,6 +185,7 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.polar_depth_loss_weight = polar_depth_loss_weight
         self.polar_consistency_weight = polar_consistency_weight
         self.sparse_depth_consistency_weight = sparse_depth_consistency_weight
+        self.anchor_depth_consistency_weight = anchor_depth_consistency_weight
         self.depth_smoothness_weight = depth_smoothness_weight
         self.polar_depth_keep_probability = polar_depth_keep_probability
         self.polar_depth_min = polar_depth_min
@@ -236,11 +238,11 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         if use_polar_depth_self_supervision and not polar_enabled:
             raise ValueError("Polar/depth self-supervision requires polar_enabled=True")
         if use_polar_depth_self_supervision and polar_backbone not in (
-            "sfp_wild", "polarapp_taskaware"
+            "sfp_wild", "polarapp_taskaware", "cga_dinov3_normal"
         ):
             raise ValueError(
                 "Normal/depth self-supervision requires polar_backbone='sfp_wild' "
-                "or 'polarapp_taskaware'"
+                "or 'polarapp_taskaware' or 'cga_dinov3_normal'"
             )
         if (
             use_polar_depth_self_supervision

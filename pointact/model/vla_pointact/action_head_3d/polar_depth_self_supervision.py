@@ -317,7 +317,7 @@ class PolarPointDepthDecoder(nn.Module):
         return depth, decoded
 
 
-def depth_to_camera_points(depth: Tensor, intrinsics: Tensor) -> Tensor:
+def depth_to_camera_points(depth: Tensor, intrinsics: Tensor, pixel_center_offset: float = 0.5) -> Tensor:
     """Back-project ``[N,1,H,W]`` depth to OpenCV camera points ``[N,3,H,W]``."""
     if depth.ndim != 4 or depth.shape[1] != 1:
         raise ValueError("depth must be [N,1,H,W]")
@@ -329,8 +329,8 @@ def depth_to_camera_points(depth: Tensor, intrinsics: Tensor) -> Tensor:
         torch.arange(width, device=depth.device, dtype=depth.dtype),
         indexing="ij",
     )
-    rows = rows + 0.5
-    cols = cols + 0.5
+    rows = rows + pixel_center_offset
+    cols = cols + pixel_center_offset
     cols = cols.expand(n, -1, -1)
     rows = rows.expand(n, -1, -1)
     z = depth[:, 0]
@@ -339,9 +339,9 @@ def depth_to_camera_points(depth: Tensor, intrinsics: Tensor) -> Tensor:
     return torch.stack((x, y, z), dim=1)
 
 
-def depth_to_normals(depth: Tensor, intrinsics: Tensor, eps: float = 1e-6) -> tuple[Tensor, Tensor]:
+def depth_to_normals(depth: Tensor, intrinsics: Tensor, eps: float = 1e-6, pixel_center_offset: float = 0.5) -> tuple[Tensor, Tensor]:
     """Compute camera-facing normals and an interior finite-difference mask."""
-    points = depth_to_camera_points(depth, intrinsics)
+    points = depth_to_camera_points(depth, intrinsics, pixel_center_offset)
     du = points.new_zeros(points.shape)
     dv = points.new_zeros(points.shape)
     du[:, :, :, 1:-1] = points[:, :, :, 2:] - points[:, :, :, :-2]
@@ -363,7 +363,50 @@ def depth_to_normals(depth: Tensor, intrinsics: Tensor, eps: float = 1e-6) -> tu
 
 def _masked_mean(values: Tensor, weights: Tensor) -> Tensor:
     weights = weights.to(values.dtype)
+    values = torch.where(weights > 0, values, torch.zeros_like(values))
     return (values * weights).sum() / weights.sum().clamp_min(1.0)
+
+
+def structured_depth_holdout(valid: Tensor, keep_probability: float, block_size: int = 8) -> Tensor:
+    """Select whole image blocks before PTv3; callers remove their source points."""
+    height, width = valid.shape[-2:]
+    coarse = torch.rand((*valid.shape[:-2], (height + block_size - 1) // block_size,
+                         (width + block_size - 1) // block_size), device=valid.device)
+    hidden = (coarse >= keep_probability).repeat_interleave(block_size, -2).repeat_interleave(block_size, -1)
+    return valid.bool() & hidden[..., :height, :width]
+
+
+@torch.no_grad()
+def normal_anchor_confidence(depth: Tensor, intrinsics: Tensor, teacher: Tensor, valid: Tensor, pixel_center_offset: float = 0.5) -> Tensor:
+    """Boundary-safe local orientation evidence, not a guarantee of metric accuracy."""
+    points = depth_to_camera_points(depth, intrinsics, pixel_center_offset)
+    sides, supported = [], []
+    for dy, dx in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        selected = torch.zeros_like(points)
+        found = torch.zeros_like(valid)
+        for radius in range(1, 7):
+            neighbor = torch.roll(depth, (dy * radius, dx * radius), (-2, -1))
+            neighbor_valid = torch.roll(valid, (dy * radius, dx * radius), (-2, -1)).clone()
+            if dy < 0:
+                neighbor_valid[..., -radius:, :] = False
+            elif dy > 0:
+                neighbor_valid[..., :radius, :] = False
+            elif dx < 0:
+                neighbor_valid[..., -radius:] = False
+            else:
+                neighbor_valid[..., :radius] = False
+            safe = neighbor_valid & ((depth - neighbor).abs() < (0.01 + 0.02 * depth.abs())) & ~found
+            selected = torch.where(safe, torch.roll(points, (dy * radius, dx * radius), (-2, -1)), selected)
+            found |= safe
+        sides.append(selected)
+        supported.append(found)
+    du, dv = sides[0] - sides[1], sides[2] - sides[3]
+    normal = F.normalize(torch.cross(du, dv, dim=1), dim=1, eps=1e-6)
+    normal *= torch.where((normal * -points).sum(1, keepdim=True) < 0, -1., 1.)
+    safe = supported[0] & supported[1] & supported[2] & supported[3]
+    safe &= torch.linalg.vector_norm(torch.cross(du, dv, dim=1), dim=1, keepdim=True) > 1e-8
+    cosine = (normal * F.normalize(teacher, dim=1, eps=1e-6)).sum(1, keepdim=True)
+    return safe.float() * valid.float() * ((cosine - 0.8660254) / (1 - 0.8660254)).clamp(0, 1)
 
 
 class PolarDepthSelfSupervision(nn.Module):
@@ -380,6 +423,8 @@ class PolarDepthSelfSupervision(nn.Module):
         sparse_depth_weight: float = 1.0,
         smoothness_weight: float = 0.01,
         use_polar_features: bool = True,
+        anchor_depth_weight: float = 0.0,
+        pixel_center_offset: float = 0.5,
     ):
         super().__init__()
         if not 0 < depth_keep_probability < 1:
@@ -392,6 +437,8 @@ class PolarDepthSelfSupervision(nn.Module):
         self.normal_weight = float(normal_weight)
         self.sparse_depth_weight = float(sparse_depth_weight)
         self.smoothness_weight = float(smoothness_weight)
+        self.anchor_depth_weight = float(anchor_depth_weight)
+        self.pixel_center_offset = float(pixel_center_offset)
 
     @staticmethod
     def _cauchy(x: Tensor, scale: float = 0.1) -> Tensor:
@@ -413,6 +460,7 @@ class PolarDepthSelfSupervision(nn.Module):
         depth_supervision_mask: Tensor | None = None,
         normal_targets: Tensor | None = None,
         sfp_normals: Tensor | None = None,
+        workspace_mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if polar_images.ndim != 5 or polar_images.shape[2] != 7:
             raise ValueError("polar_images must be [B,V,7,H,W]")
@@ -449,30 +497,30 @@ class PolarDepthSelfSupervision(nn.Module):
             for valid in point_valid_levels
         )
 
-        sparse = sparse_valid = depth_supervision_mask = None
+        sparse = sparse_valid = None
         if compute_loss:
             sparse = observed_depth.reshape(batch * views, 1, height, width).float()
             sparse_valid = observed_depth_valid.reshape(batch * views, 1, height, width).bool()
+            sparse_valid &= torch.isfinite(sparse) & (sparse > 0)
+            if workspace_mask is not None:
+                sparse_valid &= workspace_mask.reshape_as(sparse).bool()
+            if pixel_valid is not None:
+                sparse_valid &= pixel_valid.reshape_as(sparse).bool()
+            if view_valid is not None:
+                sparse_valid &= view_valid.reshape(batch * views, 1, 1, 1).bool()
             # Hide a random subset of projected point features at observed
             # target pixels. The depth image itself is never a decoder input.
             if self.training:
                 if depth_supervision_mask is None:
-                    keep = (torch.rand_like(sparse) < self.depth_keep_probability) | ~sparse_valid
-                    depth_supervision_mask = sparse_valid & ~keep
+                    depth_supervision_mask = structured_depth_holdout(sparse_valid, self.depth_keep_probability)
+                    # Legacy direct callers have not removed source points
+                    # before PTv3; mask their supplied dense maps defensively.
+                    hidden = tuple(F.adaptive_max_pool2d(depth_supervision_mask.float(), p.shape[-2:]).bool()
+                                   for p in flat_point_levels)
+                    flat_point_levels = tuple(p * (~h).to(p.dtype) for p, h in zip(flat_point_levels, hidden))
+                    flat_point_valid = tuple(v & ~h for v, h in zip(flat_point_valid, hidden))
                 else:
                     depth_supervision_mask = depth_supervision_mask.reshape_as(sparse).bool()
-                masked_levels, masked_valid = [], []
-                for points, valid in zip(flat_point_levels, flat_point_valid):
-                    # Mask a coarse cell if any held-out target falls inside
-                    # its receptive region, avoiding a multiscale copy path.
-                    hidden_level = F.adaptive_max_pool2d(
-                        depth_supervision_mask.float(), points.shape[-2:]
-                    ).bool()
-                    keep_level = ~hidden_level
-                    masked_levels.append(points * keep_level.to(points.dtype))
-                    masked_valid.append(valid & keep_level)
-                flat_point_levels = tuple(masked_levels)
-                flat_point_valid = tuple(masked_valid)
             else:
                 depth_supervision_mask = sparse_valid
 
@@ -482,6 +530,8 @@ class PolarDepthSelfSupervision(nn.Module):
             flat_point_valid,
             output_size=(height, width),
         )
+        # Cross products and log-depth residuals need FP32 under BF16 autocast.
+        prediction = prediction.float()
         token_mask = torch.ones_like(decoded[:, :1], dtype=torch.bool)
         if pixel_valid is not None:
             token_mask &= F.interpolate(
@@ -507,7 +557,7 @@ class PolarDepthSelfSupervision(nn.Module):
             return output
 
         flat_k = intrinsics.reshape(batch * views, 3, 3).to(prediction.dtype)
-        normals, normal_valid = depth_to_normals(prediction, flat_k)
+        normals, normal_valid = depth_to_normals(prediction, flat_k, pixel_center_offset=self.pixel_center_offset)
         polar = polar_images.reshape(batch * views, 7, height, width).to(prediction.dtype)
         target_normals = normal_targets.detach().reshape(
             batch * views, 3, height, width
@@ -529,6 +579,13 @@ class PolarDepthSelfSupervision(nn.Module):
         ).clamp(-1.0, 1.0)
         normal_error = 1.0 - cosine
         normal_mask = normal_valid & target_valid
+        if workspace_mask is not None:
+            workspace = workspace_mask.reshape(batch * views, 1, height, width).bool()
+            # Require the normal's finite-difference stencil to stay inside ROI.
+            normal_workspace = workspace.clone()
+            for dy, dx in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                normal_workspace &= torch.roll(workspace, (dy, dx), (-2, -1))
+            normal_mask &= normal_workspace
         if pixel_valid is not None:
             normal_mask &= pixel_valid.reshape(batch * views, 1, height, width).bool()
         if view_valid is not None:
@@ -536,10 +593,20 @@ class PolarDepthSelfSupervision(nn.Module):
         normal_consistency_loss = _masked_mean(normal_error, normal_mask)
 
         depth_mask = (
-            depth_supervision_mask & torch.isfinite(sparse) & (sparse > 0)
+            depth_supervision_mask & sparse_valid
         )
-        log_depth_error = torch.log(prediction.clamp_min(1e-6)) - torch.log(sparse.clamp_min(1e-6))
+        safe_sparse = torch.where(sparse_valid, sparse, torch.ones_like(sparse))
+        log_depth_error = torch.log(prediction.clamp_min(1e-6)) - torch.log(safe_sparse)
         sparse_depth_loss = _masked_mean(self._cauchy(log_depth_error), depth_mask)
+        anchor_weights = normal_anchor_confidence(safe_sparse, flat_k, target_normals, sparse_valid, self.pixel_center_offset)
+        anchor_weights *= (~depth_supervision_mask).float()
+        if view_valid is not None:
+            anchor_weights *= view_valid.reshape(batch * views, 1, 1, 1).float()
+            depth_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
+            sparse_depth_loss = _masked_mean(self._cauchy(log_depth_error), depth_mask)
+        if pixel_valid is not None:
+            anchor_weights *= pixel_valid.reshape_as(sparse).float()
+        anchor_depth_loss = _masked_mean(self._cauchy(log_depth_error), anchor_weights)
 
         inverse_depth = prediction.reciprocal()
         image = polar[:, 0:1]
@@ -556,11 +623,15 @@ class PolarDepthSelfSupervision(nn.Module):
             self.normal_weight * normal_consistency_loss
             + self.sparse_depth_weight * sparse_depth_loss
             + self.smoothness_weight * smoothness_loss
+            + self.anchor_depth_weight * anchor_depth_loss
         )
         output.update({
             "loss": total,
             "normal_consistency_loss": normal_consistency_loss,
             "sparse_depth_loss": sparse_depth_loss,
+            "holdout_depth_loss": sparse_depth_loss,
+            "anchor_depth_loss": anchor_depth_loss,
+            "anchor_weights": anchor_weights.reshape(batch, views, 1, height, width),
             "smoothness_loss": smoothness_loss,
             "predicted_normals": normals.reshape(batch, views, 3, height, width),
             "normal_targets": target_normals.reshape(batch, views, 3, height, width),
