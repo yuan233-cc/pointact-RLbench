@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from pointact.data.workspace_geometry_dataset import WorkspaceGeometryDataset, collate_geometry
 from pointact.model.vla_pointact.workspace_geometry import WorkspaceGeometryModel
+from pointact.data.observed_workspace_mask import operation_workspace
 
 
 def main():
@@ -50,6 +51,8 @@ def main():
     torch.set_num_threads(4)
     args.output_dir.mkdir(parents=True)
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    config.update(workspace_bounds=operation_workspace().tolist(), workspace_mask_version="observed_neighbors_v1",
+                  hole_neighbor_radius_pixels=12, hole_min_support=4)
     (args.output_dir / "config.json").write_text(json.dumps(config, indent=2))
     train = WorkspaceGeometryDataset(args.dataset_root, args.backbone, cga_records=args.cga_records)
     val = WorkspaceGeometryDataset(args.dataset_root, args.backbone, split="val", cga_records=args.cga_records)

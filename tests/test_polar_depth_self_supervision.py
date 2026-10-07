@@ -32,6 +32,9 @@ def test_weighted_workspace_has_two_losses_no_holdout_and_all_observed_targets()
     kwargs = dict(normal_targets=normal, workspace_mask=workspace, observation_confidence=q)
     module.train()
     output = module(*args, **kwargs)
+    assert torch.isnan(output["predicted_depth"][..., :4, :]).all()
+    assert torch.isfinite(output["predicted_depth"][..., 4:, :]).all()
+    assert torch.equal(output["prediction_valid_mask"][:, :, 0], workspace)
     assert "holdout_depth_loss" not in output and "anchor_depth_loss" not in output
     weights = output["point_fit_weights"]
     assert (weights[..., :4, :] == 0).all()

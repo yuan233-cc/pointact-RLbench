@@ -32,8 +32,14 @@ class _ConvBlock(nn.Module):
             nn.SiLU(inplace=True),
         )
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.layers(x)
+    def forward(self, x: Tensor, mask: Tensor | None = None) -> Tensor:
+        if mask is None:
+            return self.layers(x)
+        x = x * mask.to(x.dtype)
+        for layer in self.layers:
+            x = layer(x)
+            x = x * mask.to(x.dtype)
+        return x
 
 
 def rasterize_fused_point_features(
@@ -276,6 +282,7 @@ class PolarPointDepthDecoder(nn.Module):
         point_feature_levels: tuple[Tensor, ...],
         point_valid_levels: tuple[Tensor, ...],
         output_size: tuple[int, int] | None = None,
+        workspace_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Return dense metric depth and the final dense completion feature."""
         if not (len(point_feature_levels) == len(point_valid_levels) == 5):
@@ -294,19 +301,25 @@ class PolarPointDepthDecoder(nn.Module):
         )
         p1, p2, p3, p4, p5 = point_levels
         m1, m2, m3, m4, m5 = (mask.to(p1.dtype) for mask in point_valid_levels)
+        rois = (None,) * 5 if workspace_mask is None else tuple(
+            F.adaptive_max_pool2d(workspace_mask.float(), p.shape[-2:]).bool()
+            for p in point_levels)
+        if workspace_mask is not None:
+            p1, p2, p3, p4, p5 = (p * r.to(p.dtype) for p, r in zip(point_levels, rois))
+            m1, m2, m3, m4, m5 = (m * r.to(m.dtype) for m, r in zip((m1, m2, m3, m4, m5), rois))
 
         def inputs(*values):
             return torch.cat(values, dim=1)
 
-        decoded = self.fuse5(inputs(*((x5,) if self.use_polar_features else ()), p5, m5))
+        decoded = self.fuse5(inputs(*((x5,) if self.use_polar_features else ()), p5, m5), rois[4])
         decoded = self._up_to(decoded, p4)
-        decoded = self.fuse4(inputs(decoded, *((x4,) if self.use_polar_features else ()), p4, m4))
+        decoded = self.fuse4(inputs(decoded, *((x4,) if self.use_polar_features else ()), p4, m4), rois[3])
         decoded = self._up_to(decoded, p3)
-        decoded = self.fuse3(inputs(decoded, *((x3,) if self.use_polar_features else ()), p3, m3))
+        decoded = self.fuse3(inputs(decoded, *((x3,) if self.use_polar_features else ()), p3, m3), rois[2])
         decoded = self._up_to(decoded, p2)
-        decoded = self.fuse2(inputs(decoded, *((x2,) if self.use_polar_features else ()), p2, m2))
+        decoded = self.fuse2(inputs(decoded, *((x2,) if self.use_polar_features else ()), p2, m2), rois[1])
         decoded = self._up_to(decoded, p1)
-        decoded = self.fuse1(inputs(decoded, *((x1,) if self.use_polar_features else ()), p1, m1))
+        decoded = self.fuse1(inputs(decoded, *((x1,) if self.use_polar_features else ()), p1, m1), rois[0])
 
         # A bounded parameterization prevents invalid/negative geometry during
         # early joint training; held-out observed-depth targets provide scale.
@@ -544,6 +557,8 @@ class PolarDepthSelfSupervision(nn.Module):
             flat_point_levels,
             flat_point_valid,
             output_size=(height, width),
+            workspace_mask=(None if workspace_mask is None else
+                            workspace_mask.reshape(batch * views, 1, height, width)),
         )
         # Cross products and log-depth residuals need FP32 under BF16 autocast.
         prediction = prediction.float()
@@ -553,6 +568,9 @@ class PolarDepthSelfSupervision(nn.Module):
                 pixel_valid.reshape(batch * views, 1, height, width).float(),
                 size=decoded.shape[-2:], mode="nearest",
             ).bool()
+        if workspace_mask is not None:
+            token_mask &= F.adaptive_max_pool2d(
+                workspace_mask.reshape(batch * views, 1, height, width).float(), decoded.shape[-2:]).bool()
         if view_valid is not None:
             token_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
         pooled = (decoded * token_mask.to(decoded.dtype)).sum((-2, -1))
@@ -568,6 +586,11 @@ class PolarDepthSelfSupervision(nn.Module):
             "predicted_depth": prediction.reshape(batch, views, 1, height, width),
             "completion_token": completion_token,
         }
+        if workspace_mask is not None:
+            depth_mask = workspace_mask.reshape(expected_depth_shape).bool()
+            output["predicted_depth"] = torch.where(depth_mask, output["predicted_depth"],
+                torch.full_like(output["predicted_depth"], float("nan")))
+            output["prediction_valid_mask"] = depth_mask
         if not compute_loss:
             return output
 

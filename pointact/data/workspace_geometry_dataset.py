@@ -10,9 +10,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .rlbench_polar_normal_lmdb import generate_rlbench_cga_input
+from .observed_workspace_mask import operation_workspace, observed_workspace_mask
 
 msgpack_numpy.patch()
-WORKSPACE = np.array([[-.5, 1.5], [-1., 1.], [.7505, 2.]], dtype=np.float32)
+WORKSPACE = operation_workspace()
 
 
 class WorkspaceGeometryDataset(Dataset):
@@ -82,8 +83,6 @@ class WorkspaceGeometryDataset(Dataset):
             raise ValueError(f"Invalid calibrated frame {key!r}")
         if not np.isfinite(points).all() or not np.isfinite(k).all() or not np.isfinite(transform).all():
             raise ValueError("Nonfinite geometry/calibration")
-        valid = ((points[:, :3] > WORKSPACE[:, 0]) & (points[:, :3] < WORKSPACE[:, 1])).all(1)
-        points, pixels = points[valid], pixels[valid]
         if not len(points) or np.any((pixels < 0) | (pixels >= height * width)):
             raise ValueError("No valid workspace points or incorrect pixel IDs")
         camera = points[:, :3] @ transform[:3, :3].T + transform[:3, 3]
@@ -92,29 +91,23 @@ class WorkspaceGeometryDataset(Dataset):
         mismatch = (expected[:, 1] * width + expected[:, 0]) != pixels
         if mismatch.mean() > .01:
             raise ValueError(f"Calibration/pixel mismatch in {key.decode()}: {mismatch.mean():.3%}")
-        # Targets come only from incomplete sensor points before subsampling.
+        # Rasterize ALL available incomplete observations before workspace crop.
+        # Outside observations are essential negative evidence for hole masks.
         depth = np.full(height * width, np.inf, np.float32)
         np.minimum.at(depth, pixels[camera[:, 2] > 0], camera[camera[:, 2] > 0, 2])
-        observed_valid = np.isfinite(depth)
-        depth[~observed_valid] = 0
+        depth[~np.isfinite(depth)] = np.nan
+        depth = depth.reshape(height, width)
+        workspace, observed_valid, holes = observed_workspace_mask(depth, k, transform)
+        workspace &= pixel_valid
+        observed_valid &= pixel_valid
+        holes &= pixel_valid
+        valid = ((points[:, :3] > WORKSPACE[:, 0]) & (points[:, :3] < WORKSPACE[:, 1])).all(1)
+        points, pixels = points[valid], pixels[valid]
+        if not len(points):
+            raise ValueError(f"No observed operation-workspace points: {key.decode()}")
         yy, xx = np.mgrid[:height, :width].astype(np.float32)
         rays = np.stack(((xx + .5 - k[0, 2]) / k[0, 0], (yy + .5 - k[1, 2]) / k[1, 1], np.ones_like(xx)))
         unit_rays = rays / np.maximum(np.linalg.norm(rays, axis=0, keepdims=True), 1e-8)
-        inverse = np.linalg.inv(transform)
-        direction = rays.transpose(1, 2, 0) @ inverse[:3, :3].T
-        origin = inverse[:3, 3]
-        parallel = np.abs(direction) < 1e-9
-        safe_direction = np.where(parallel, 1, direction)
-        t0, t1 = (WORKSPACE[:, 0] - origin) / safe_direction, (WORKSPACE[:, 1] - origin) / safe_direction
-        near = np.where(parallel, -np.inf, np.minimum(t0, t1)).max(-1)
-        far = np.where(parallel, np.inf, np.maximum(t0, t1)).min(-1)
-        outside_parallel = (parallel & ((origin < WORKSPACE[:, 0]) | (origin > WORKSPACE[:, 1]))).any(-1)
-        workspace = (far >= np.maximum(near, 0)) & ~outside_parallel
-        # Crop once, retaining optical observations over depth holes.
-        envelope = np.zeros((height, width), bool)
-        rows, cols = pixels // width, pixels % width
-        envelope[rows.min():rows.max()+1, cols.min():cols.max()+1] = True
-        workspace &= envelope
         rng = np.random.default_rng(index) if self.split == "val" else np.random
         sampled = rng.choice(len(points), min(len(points), self.max_points), replace=False)
         points, pixels = points[sampled], pixels[sampled]
