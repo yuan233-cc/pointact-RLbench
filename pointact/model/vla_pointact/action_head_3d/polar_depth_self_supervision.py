@@ -441,6 +441,7 @@ class PolarDepthSelfSupervision(nn.Module):
         supervision_mode: str = "legacy",
         point_fit_scale_m: float = 0.05,
         inconsistent_point_weight: float = 0.1,
+        hole_normal_weight: float = 1.0,
     ):
         super().__init__()
         if not 0 < depth_keep_probability < 1:
@@ -461,6 +462,9 @@ class PolarDepthSelfSupervision(nn.Module):
             raise ValueError("Require positive metric scale and point weight in (0,1]")
         self.supervision_mode = supervision_mode
         self.point_fit_scale_m = float(point_fit_scale_m)
+        if not 1 <= hole_normal_weight < float("inf"):
+            raise ValueError("hole_normal_weight must be finite and >= 1")
+        self.hole_normal_weight = float(hole_normal_weight)
         self.inconsistent_point_weight = float(inconsistent_point_weight)
 
     @staticmethod
@@ -628,7 +632,12 @@ class PolarDepthSelfSupervision(nn.Module):
             normal_mask &= pixel_valid.reshape(batch * views, 1, height, width).bool()
         if view_valid is not None:
             normal_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
-        normal_consistency_loss = _masked_mean(normal_error, normal_mask)
+        # Missing original sensor evidence, not rows rejected by PTv3 filtering.
+        normal_weights = normal_mask.to(normal_error.dtype)
+        if self.supervision_mode == "weighted_workspace":
+            normal_weights *= torch.where(sparse_valid, 1.0, self.hole_normal_weight)
+        normal_consistency_loss = _masked_mean(normal_error, normal_weights)
+        output["normal_supervision_weights"] = normal_weights.reshape(expected_depth_shape)
 
         if self.supervision_mode == "weighted_workspace":
             safe_sparse = torch.where(sparse_valid, sparse, torch.ones_like(sparse))

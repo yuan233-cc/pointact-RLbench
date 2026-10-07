@@ -54,6 +54,7 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         cga_dino_normal_checkpoint=None,
         dinov3_weights=None,
         cga_dino_use_dino=True,
+        cga_dino_input_mode="robot",
         polarapp_checkpoint=None,
         polarapp_freeze=True,
         polarapp_allow_random_init=False,
@@ -72,6 +73,10 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         polar_workspace_attend_action=False,
         use_polar_depth_self_supervision=False,
         polar_depth_loss_weight=0.1,
+        polar_depth_supervision_mode="legacy",
+        polar_hole_normal_weight=3.0,
+        polar_point_fit_scale_m=0.05,
+        polar_inconsistent_point_weight=0.1,
         polar_consistency_weight=1.0,
         sparse_depth_consistency_weight=1.0,
         anchor_depth_consistency_weight=0.0,
@@ -137,6 +142,9 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         self.cga_dino_normal_checkpoint = cga_dino_normal_checkpoint
         self.dinov3_weights = dinov3_weights
         self.cga_dino_use_dino = cga_dino_use_dino
+        self.cga_dino_input_mode = cga_dino_input_mode
+        if cga_dino_input_mode not in ("robot", "native_cga"):
+            raise ValueError("cga_dino_input_mode must be robot or native_cga")
         self.polarapp_checkpoint = polarapp_checkpoint
         self.polarapp_freeze = polarapp_freeze
         self.polarapp_allow_random_init = polarapp_allow_random_init
@@ -156,15 +164,21 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
         if polar_fusion_mode not in ("projection", "bbox", "workspace"):
             raise ValueError("polar_fusion_mode must be 'projection', 'bbox' or 'workspace'")
         if polar_fusion_mode == "workspace":
-            if not polar_enabled or polar_backbone != "polarapp_taskaware":
-                raise ValueError("Workspace fusion requires polar_enabled and polarapp_taskaware")
+            if not polar_enabled or polar_backbone not in ("polarapp_taskaware", "cga_dinov3_normal"):
+                raise ValueError("Workspace fusion requires TaskNet or CGA+DINOv3")
             if ptv3_backend != "concerto":
                 raise ValueError("Workspace fusion is implemented for the Concerto PTv3 backend")
             if len(polar_bbox_feature_levels) != len(ptv3_enc_depths) or any(
                 not isinstance(level, int) or isinstance(level, bool) or level not in (0, 1, 2)
                 for level in polar_bbox_feature_levels
-            ):
+            ) and polar_backbone == "polarapp_taskaware":
                 raise ValueError("Map every PTv3 stage to a TaskNet TaF level 0, 1 or 2")
+            if polar_backbone == "cga_dinov3_normal":
+                if not cga_freeze:
+                    raise ValueError("CGA workspace memory currently requires a frozen teacher")
+                if len(ptv3_enc_depths) != 5:
+                    raise ValueError("CGA+DINO workspace fusion requires five PTv3 stages")
+                self.polar_bbox_feature_levels = [0, 1, 2, 3, 4]
         if polar_fusion_mode == "bbox":
             if not polar_enabled or polar_backbone != "polarapp_taskaware":
                 raise ValueError("BBox fusion requires polar_enabled and polarapp_taskaware")
@@ -183,6 +197,19 @@ class VLAEncDec3DModelConfig(PretrainedConfig):
                 raise ValueError("Map every PTv3 stage to a TaskNet TaF level 0, 1 or 2")
         self.use_polar_depth_self_supervision = use_polar_depth_self_supervision
         self.polar_depth_loss_weight = polar_depth_loss_weight
+        self.polar_depth_supervision_mode = polar_depth_supervision_mode
+        self.polar_hole_normal_weight = polar_hole_normal_weight
+        self.polar_point_fit_scale_m = polar_point_fit_scale_m
+        self.polar_inconsistent_point_weight = polar_inconsistent_point_weight
+        if polar_depth_supervision_mode not in ("legacy", "weighted_workspace"):
+            raise ValueError("Unknown polar_depth_supervision_mode")
+        if not 1 <= polar_hole_normal_weight < float("inf"):
+            raise ValueError("polar_hole_normal_weight must be finite and >=1")
+        if polar_depth_supervision_mode == "weighted_workspace":
+            if not use_polar_depth_self_supervision or polar_fusion_mode != "workspace":
+                raise ValueError("weighted_workspace requires workspace fusion and depth supervision")
+            if polar_backbone == "cga_dinov3_normal" and (not cga_freeze or cga_dino_input_mode != "native_cga"):
+                raise ValueError("Aligned CGA workspace training requires frozen native_cga teacher")
         self.polar_consistency_weight = polar_consistency_weight
         self.sparse_depth_consistency_weight = sparse_depth_consistency_weight
         self.anchor_depth_consistency_weight = anchor_depth_consistency_weight

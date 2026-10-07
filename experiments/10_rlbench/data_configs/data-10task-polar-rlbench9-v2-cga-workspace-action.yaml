@@ -1,0 +1,31 @@
+mm_datasets:
+
+lerobot_datasets:
+  - repo_id: hybridvla_10tasks_train_keysteps_polar_rlbench9_v2
+    root: robot_data/rlbench/lerobot_point_lmdb
+    class_name: LeRobotPointCloudDataset
+    select_video_keys: [observation.images.front_image]
+    video_key_ids_for_vlm: []
+    select_state_keys: [observation.state]
+    select_action_keys: [action]
+    converted_rot_type: euler
+    is_action_eef: True
+    is_delta_action: False
+    points_workspace:
+      X_BBOX: [-0.274, 0.774]
+      Y_BBOX: [-0.655, 0.655]
+      Z_BBOX: [0.752, 1.751]
+    observed_operation_workspace: True
+    cga_input_mode: native_cga
+    max_npoints: 4096
+    augment_pc_rot: 0
+    augment_point_color: False
+    point_cloud_dirname: points_frontview_polar_incomplete9
+    point_feature_mode: xyzrgb_polar
+    polar_feature_normalization: rgb
+    polar_dense_dirname: polar_frontview_dense
+    sfp_input_dirname: sfp_frontview_rgb_luminance_proxy
+    depth_point_pixel_dirname: point_pixel_indices
+    point_pixel_dirname: point_pixel_indices
+    use_point_image_support: True
+    state_action_norm_file: robot_data/rlbench/lerobot_point_lmdb/hybridvla_10tasks_train_keysteps_polar_rlbench9_v2/robot_state_action_stats/euler_points_frontview_incomplete_reg.json

@@ -118,6 +118,11 @@ def build_model(recipe: TrainRecipe, training_args: TrainPipelineConfig, compute
                 polar_bbox_expansion=training_args.polar_bbox_expansion,
                 polar_bbox_feature_levels=training_args.polar_bbox_feature_levels,
                 polar_workspace_attend_action=training_args.polar_workspace_attend_action,
+                cga_dino_input_mode=training_args.cga_dino_input_mode,
+                polar_depth_supervision_mode=training_args.polar_depth_supervision_mode,
+                polar_hole_normal_weight=training_args.polar_hole_normal_weight,
+                polar_point_fit_scale_m=training_args.polar_point_fit_scale_m,
+                polar_inconsistent_point_weight=training_args.polar_inconsistent_point_weight,
             )
         if training_args.use_polar_material_conditioning:
             overrides["use_polar_material_conditioning"] = True

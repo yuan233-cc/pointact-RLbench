@@ -285,13 +285,16 @@ class VLAEncDec3DProcessor(RobotPointProcessorBase):
                     "Polar inference requires T_camera_from_world or an already centered "
                     "T_camera_from_model; calibration is never replaced with identity"
                 )
-            for key in ("pixel_valid", "polar_workspace_mask", "polar_pixel_transform", "point_pixel_image_hw"):
+            for key in ("pixel_valid", "polar_workspace_mask", "polar_pixel_transform", "point_pixel_image_hw",
+                        "observed_depth", "observed_depth_valid"):
                 if key in batch:
                     inputs[key] = torch.as_tensor(batch[key]).to(device)
             if (
                 getattr(model.config, "polar_fusion_mode", "projection") == "workspace"
                 and "polar_workspace_mask" not in inputs
             ):
+                if getattr(model.config, "polar_depth_supervision_mode", "legacy") == "weighted_workspace":
+                    raise ValueError("Provide observation-derived polar_workspace_mask; no bbox fallback for joint geometry inference")
                 height, width = inputs["polar_images"].shape[-2:]
                 masks = []
                 for pixels in point_indices:

@@ -79,6 +79,8 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         sfp_input_dirname: str | None = None,
         depth_point_pixel_dirname: str | None = None,
         use_point_image_support: bool = False,
+        observed_operation_workspace: bool = False,
+        cga_input_mode: str = "robot",
         vlm_image_mode: str = "rgb",
         point_pixel_dirname: str | None = None,
         material_profiles_file: str | None = None,
@@ -111,6 +113,19 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         )
 
         self.points_workspace = points_workspace
+        self.observed_operation_workspace = observed_operation_workspace
+        self.cga_input_mode = cga_input_mode
+        if cga_input_mode not in ("robot", "native_cga"):
+            raise ValueError("cga_input_mode must be robot or native_cga")
+        if observed_operation_workspace:
+            from pointact.robot_envs.rlbench_utils.eval_utils import get_rlbench_robot_workspace
+            original = get_rlbench_robot_workspace()
+            if points_workspace is not None and any(not np.allclose(points_workspace[k], original[k])
+                                                   for k in ("X_BBOX", "Y_BBOX", "Z_BBOX")):
+                raise ValueError("Observed-operation training requires original PointACT workspace bounds")
+            self.points_workspace = original
+            if not use_point_image_support or depth_point_pixel_dirname is None:
+                raise ValueError("Observed-operation mask requires current pixel IDs and sensor depth")
         self.max_npoints = max_npoints
         self.augment_pc_rot = augment_pc_rot
         self.augment_point_color = augment_point_color
@@ -416,6 +431,23 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
             raise ValueError("T_camera_from_world must be a finite 4x4 matrix")
         if not np.isfinite(i_un).all():
             raise ValueError("SfP I_un contains non-finite values")
+        if self.cga_input_mode == "native_cga":
+            from pointact.data.rlbench_polar_normal_lmdb import generate_rlbench_cga_input
+            if intensity_name != "I_un":
+                raise ValueError("This CGA checkpoint requires its I_un proxy convention, not TaskNet S0")
+            cga_polar = dict(DoLP=tasknet_polar[0], cos2AoLP=tasknet_polar[1], sin2AoLP=tasknet_polar[2],
+                valid_mask=tasknet_polar[3] > .5,
+                AoLP_valid_mask=(tasknet_polar[1] ** 2 + tasknet_polar[2] ** 2) > 1e-8)
+            # Preserve the archived angle-valid mask, not just the dense valid mask.
+            raw_polar = self._read_sidecar(self.polar_dense_dir or self.polar_dense_frames_dir, ep_idx, frame_idx)
+            if not isinstance(raw_polar, np.ndarray):
+                source = io.BytesIO(raw_polar) if isinstance(raw_polar, bytes) else raw_polar
+                with np.load(source) as frame:
+                    cga_polar = {name: np.asarray(frame[name]).copy() for name in
+                        ("DoLP", "cos2AoLP", "sin2AoLP", "valid_mask", "AoLP_valid_mask")}
+            observation, prior = generate_rlbench_cga_input(cga_polar, {"I_un": i_un * 255., "K": K}, input_mode="native_cga")
+            i_un = observation[4]
+            tasknet_polar = np.stack((observation[7], observation[5], observation[6], cga_polar["valid_mask"].astype(np.float32)))
         rays = self._viewing_directions(K, *i_un.shape)
         polar_images = np.concatenate((i_un[None], tasknet_polar[:3], rays), axis=0)
         workspace_mask = (
@@ -489,6 +521,20 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         if self.sfp_input_dir is not None:
             dense_polar = self._load_dense_polar(ep_idx, frame_idx)
             item.update(self._load_sfp_inputs(ep_idx, frame_idx, dense_polar))
+            if self.cga_input_mode == "native_cga" and "polar_rgb" not in item:
+                rgb_key = self.select_video_keys[0]
+                if rgb_key not in item:
+                    item.update(self._query_videos({rgb_key: [item["timestamp"].item()]}, ep_idx))
+                rgb = torch.as_tensor(item[rgb_key]).float()
+                if rgb.ndim == 4:
+                    rgb = rgb[0]
+                if rgb.shape[-1] == 3:
+                    rgb = rgb.permute(2, 0, 1)
+                if rgb.max() > 1:
+                    rgb = rgb / 255.
+                if rgb.shape != (3, *item["polar_images"].shape[-2:]):
+                    raise ValueError("CGA RGB and polar pixels must be aligned before augmentation")
+                item["polar_rgb"] = rgb[None].contiguous()
         if self.use_polar_material_conditioning:
             rgb_key = self.select_video_keys[0]
             if rgb_key not in item:
@@ -559,7 +605,17 @@ class LeRobotPointCloudDataset(LeRobotDatasetMixin):
         point_cloud = self.filter_point_cloud_by_workspace(point_cloud)
         if self.use_point_image_support and len(point_cloud) == 0:
             raise ValueError("Image-support fusion requires nonempty points after workspace filtering")
-        if self.use_point_image_support and "polar_workspace_mask" in item:
+        if self.observed_operation_workspace:
+            from pointact.data.observed_workspace_mask import observed_workspace_mask
+            depth = item["observed_depth"][0, 0].numpy().copy()
+            depth[~item["observed_depth_valid"][0, 0].numpy().astype(bool)] = np.nan
+            workspace, observed, _ = observed_workspace_mask(depth, item["polar_K"][0].numpy(),
+                item["T_camera_from_world"][0].numpy())
+            pixel_valid = item["pixel_valid"][0].numpy().astype(bool)
+            item["polar_workspace_mask"] = torch.from_numpy((workspace & pixel_valid)[None])
+            item["observed_depth"] = torch.from_numpy(depth[None, None])
+            item["observed_depth_valid"] = torch.from_numpy((observed & pixel_valid)[None, None])
+        elif self.use_point_image_support and "polar_workspace_mask" in item:
             # An RLBench camera may itself lie inside the broad 3D AABB, making
             # ray/AABB intersection cover the whole image.  The envelope of all
             # pre-subsampling points that survived the workspace filter gives a

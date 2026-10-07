@@ -66,7 +66,7 @@ class WorkspaceGeometryModel(nn.Module):
     """No language/action tokens. Both teachers retain checkpoint preprocessing."""
     def __init__(self, backbone, checkpoint, concerto_checkpoint, dino_weights=None,
                  supervision_mode="weighted_workspace", point_fit_scale_m=0.05,
-                 inconsistent_point_weight=0.1):
+                 inconsistent_point_weight=0.1, hole_normal_weight=3.0):
         super().__init__()
         self.backbone = backbone
         self.supervision_mode = supervision_mode
@@ -109,7 +109,7 @@ class WorkspaceGeometryModel(nn.Module):
             anchor_depth_weight=0.05 if supervision_mode == "legacy" else 0.0,
             smoothness_weight=0.0, use_polar_features=False, pixel_center_offset=0.0,
             supervision_mode=supervision_mode, point_fit_scale_m=point_fit_scale_m,
-            inconsistent_point_weight=inconsistent_point_weight)
+            inconsistent_point_weight=inconsistent_point_weight, hole_normal_weight=hole_normal_weight)
 
     def train(self, mode=True):
         super().train(mode)

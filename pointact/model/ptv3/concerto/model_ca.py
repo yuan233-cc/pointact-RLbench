@@ -61,6 +61,12 @@ class CrossAttention(PointModule):
     ):
         device = query.device
 
+        # Optional language/action streams may be genuinely empty. Launching a
+        # zero-length FlashAttention kernel can fail during backward. No keys
+        # means no residual contribution (including no projection bias).
+        if query.shape[0] == 0 or context.shape[0] == 0:
+            return query * 0.0
+
         q = self.q(query).view(-1, self.num_heads, self.head_dim)
         kv = self.kv(context).view(-1, 2, self.num_heads, self.head_dim)
 

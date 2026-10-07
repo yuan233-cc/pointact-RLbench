@@ -13,7 +13,7 @@ export PYTHONPATH="$repo_root:${PYTHONPATH:-}"
 
 tasknet_default="$repo_root/../PolarAPP/SfP/experiments/checkpoints/huggingface/SfP/TaskNet/TaskNet.pth"
 tasknet_checkpoint="${TASKNET_CHECKPOINT:-$tasknet_default}"
-if [[ ! -f "$tasknet_checkpoint" ]]; then
+if [[ "${POLAR_BACKBONE:-polarapp_taskaware}" == "polarapp_taskaware" && ! -f "$tasknet_checkpoint" ]]; then
     echo "TaskNet checkpoint does not exist: $tasknet_checkpoint" >&2
     exit 2
 fi
@@ -116,7 +116,10 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --ptv3_clf_head_pos_bins "${POSITION_BINS:-100}" \
     --action_head_pos_center moe \
     --max_state_dim 10 --max_action_dim 10 \
-    --polar_enabled True --polar_backbone polarapp_taskaware \
+    --polar_enabled True --polar_backbone "${POLAR_BACKBONE:-polarapp_taskaware}" \
+    --cga_dino_normal_checkpoint "${CGA_CHECKPOINT:-$repo_root/pretrained/cga_dinov3_mixed_10tasks_v2_20261004/best.pt}" \
+    --dinov3_weights "${DINOV3_WEIGHTS:-$repo_root/pretrained/cga_dinov3_mixed_10tasks_v2_20261004/dinov3_convnext_base_pretrain_lvd1689m.pth}" \
+    --cga_dino_input_mode "${CGA_INPUT_MODE:-robot}" --cga_freeze True \
     --polarapp_checkpoint "$tasknet_checkpoint" \
     --polarapp_allow_random_init False --polarapp_freeze "$tasknet_freeze" \
     --polarapp_pyramid_channels "${TASKNET_PYRAMID_CHANNELS:-192}" \
@@ -134,6 +137,10 @@ accelerate launch "${accelerate_args[@]}" scripts/train.py \
     --polar_max_views 1 --polar_writeback False \
     --use_polar_depth_self_supervision True \
     --polar_depth_loss_weight "${POLAR_DEPTH_LOSS_WEIGHT:-0.1}" \
+    --polar_depth_supervision_mode "${POLAR_DEPTH_SUPERVISION_MODE:-legacy}" \
+    --polar_hole_normal_weight "${POLAR_HOLE_NORMAL_WEIGHT:-3.0}" \
+    --polar_point_fit_scale_m "${POLAR_POINT_FIT_SCALE_M:-0.05}" \
+    --polar_inconsistent_point_weight "${POLAR_INCONSISTENT_POINT_WEIGHT:-0.1}" \
     --polar_consistency_weight "${POLAR_CONSISTENCY_WEIGHT:-1.0}" \
     --sparse_depth_consistency_weight "${SPARSE_DEPTH_WEIGHT:-1.0}" \
     --depth_smoothness_weight "${DEPTH_SMOOTHNESS_WEIGHT:-0.01}" \

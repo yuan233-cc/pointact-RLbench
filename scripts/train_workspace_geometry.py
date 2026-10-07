@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--supervision-mode", choices=("weighted_workspace",), default="weighted_workspace")
     parser.add_argument("--point-fit-scale-m", type=float, default=0.05)
     parser.add_argument("--inconsistent-point-weight", type=float, default=0.1)
+    parser.add_argument("--hole-normal-weight", type=float, default=3.0)
     parser.add_argument("--probe-seconds", type=float, default=0)
     parser.add_argument("--save-steps", type=int, default=250)
     parser.add_argument("--validate-every-epochs", type=int, default=1)
@@ -84,7 +85,8 @@ def main():
     model = WorkspaceGeometryModel(args.backbone, args.teacher_checkpoint,
         args.concerto_checkpoint, args.dino_weights, supervision_mode=args.supervision_mode,
         point_fit_scale_m=args.point_fit_scale_m,
-        inconsistent_point_weight=args.inconsistent_point_weight).cuda()
+        inconsistent_point_weight=args.inconsistent_point_weight,
+        hole_normal_weight=args.hole_normal_weight).cuda()
     # Cached tensors are fingerprinted above; the frozen teacher remains on CPU.
     # No trainable adapter/Concerto/decoder tensor is cached or detached.
     if args.cache_dir:
