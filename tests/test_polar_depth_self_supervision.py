@@ -13,6 +13,44 @@ POLAR_CHANNELS = (8, 16, 24, 32, 32)
 POINT_CHANNELS = (6, 8, 12, 16, 20)
 
 
+def test_weighted_workspace_has_two_losses_no_holdout_and_all_observed_targets():
+    torch.manual_seed(7)
+    maps, masks = _point_maps(requires_grad=True)
+    module = PolarDepthSelfSupervision(POLAR_CHANNELS, POINT_CHANNELS,
+        use_polar_features=False, supervision_mode="weighted_workspace", smoothness_weight=0.)
+    depth = torch.ones(1, 1, 1, 32, 32)
+    valid = torch.ones_like(depth, dtype=torch.bool)
+    workspace = valid[:, :, 0].clone()
+    workspace[..., :4, :] = False
+    normal = torch.zeros(1, 1, 3, 32, 32)
+    normal[:, :, 2] = -1
+    k = torch.tensor([[[[100., 0, 16], [0, 100., 16], [0, 0, 1.]]]])
+    q = torch.zeros_like(depth, requires_grad=True)
+    with torch.no_grad():
+        q[..., 16:, :] = 1
+    args = (None, maps, masks, torch.zeros(1, 1, 7, 32, 32), k, depth, valid)
+    kwargs = dict(normal_targets=normal, workspace_mask=workspace, observation_confidence=q)
+    module.train()
+    output = module(*args, **kwargs)
+    assert "holdout_depth_loss" not in output and "anchor_depth_loss" not in output
+    weights = output["point_fit_weights"]
+    assert (weights[..., :4, :] == 0).all()
+    assert torch.allclose(weights[..., 4:16, :], torch.full_like(weights[..., 4:16, :], .1))
+    assert (weights[..., 16:, :] == 1).all()
+    torch.testing.assert_close(output["loss"], output["normal_consistency_loss"] + output["point_fit_loss"])
+    module.eval()
+    evaluated = module(*args, **kwargs)
+    torch.testing.assert_close(output["loss"], evaluated["loss"])
+    output["predicted_depth"].retain_grad()
+    output["loss"].backward()
+    assert q.grad is None
+    assert all(torch.isfinite(m.grad).all() for m in maps)
+    # Large position errors must keep a non-redescending correcting gradient.
+    residual = torch.tensor([2., 20.], requires_grad=True)
+    torch.nn.functional.smooth_l1_loss(residual, torch.zeros_like(residual), reduction="sum").backward()
+    torch.testing.assert_close(residual.grad, torch.ones_like(residual))
+
+
 def test_supplied_holdout_is_preserved_and_invalid_depth_does_not_poison_loss():
     torch.manual_seed(1)
     levels = _features()

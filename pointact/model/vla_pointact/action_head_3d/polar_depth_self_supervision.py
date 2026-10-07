@@ -425,6 +425,9 @@ class PolarDepthSelfSupervision(nn.Module):
         use_polar_features: bool = True,
         anchor_depth_weight: float = 0.0,
         pixel_center_offset: float = 0.5,
+        supervision_mode: str = "legacy",
+        point_fit_scale_m: float = 0.05,
+        inconsistent_point_weight: float = 0.1,
     ):
         super().__init__()
         if not 0 < depth_keep_probability < 1:
@@ -439,6 +442,13 @@ class PolarDepthSelfSupervision(nn.Module):
         self.smoothness_weight = float(smoothness_weight)
         self.anchor_depth_weight = float(anchor_depth_weight)
         self.pixel_center_offset = float(pixel_center_offset)
+        if supervision_mode not in ("legacy", "weighted_workspace"):
+            raise ValueError(supervision_mode)
+        if point_fit_scale_m <= 0 or not 0 < inconsistent_point_weight <= 1:
+            raise ValueError("Require positive metric scale and point weight in (0,1]")
+        self.supervision_mode = supervision_mode
+        self.point_fit_scale_m = float(point_fit_scale_m)
+        self.inconsistent_point_weight = float(inconsistent_point_weight)
 
     @staticmethod
     def _cauchy(x: Tensor, scale: float = 0.1) -> Tensor:
@@ -461,6 +471,7 @@ class PolarDepthSelfSupervision(nn.Module):
         normal_targets: Tensor | None = None,
         sfp_normals: Tensor | None = None,
         workspace_mask: Tensor | None = None,
+        observation_confidence: Tensor | None = None,
     ) -> dict[str, Tensor]:
         if polar_images.ndim != 5 or polar_images.shape[2] != 7:
             raise ValueError("polar_images must be [B,V,7,H,W]")
@@ -510,7 +521,10 @@ class PolarDepthSelfSupervision(nn.Module):
                 sparse_valid &= view_valid.reshape(batch * views, 1, 1, 1).bool()
             # Hide a random subset of projected point features at observed
             # target pixels. The depth image itself is never a decoder input.
-            if self.training:
+            if self.supervision_mode == "weighted_workspace":
+                if depth_supervision_mask is not None:
+                    raise ValueError("weighted_workspace does not use held-out depth")
+            elif self.training:
                 if depth_supervision_mask is None:
                     depth_supervision_mask = structured_depth_holdout(sparse_valid, self.depth_keep_probability)
                     # Legacy direct callers have not removed source points
@@ -592,6 +606,38 @@ class PolarDepthSelfSupervision(nn.Module):
         if view_valid is not None:
             normal_mask &= view_valid.reshape(batch * views, 1, 1, 1).bool()
         normal_consistency_loss = _masked_mean(normal_error, normal_mask)
+
+        if self.supervision_mode == "weighted_workspace":
+            safe_sparse = torch.where(sparse_valid, sparse, torch.ones_like(sparse))
+            if observation_confidence is None:
+                confidence = normal_anchor_confidence(safe_sparse, flat_k, target_normals,
+                    sparse_valid, self.pixel_center_offset)
+            else:
+                if observation_confidence.shape != expected_depth_shape:
+                    raise ValueError("observation_confidence must match observed_depth")
+                confidence = observation_confidence.detach().reshape_as(sparse).float()
+            confidence = torch.nan_to_num(confidence, nan=0., posinf=0., neginf=0.).clamp(0, 1)
+            confidence *= sparse_valid.float()
+            weights = sparse_valid.float() * (self.inconsistent_point_weight
+                + (1 - self.inconsistent_point_weight) * confidence)
+            # Pixel correspondence fixes the ray. Along-ray 3D distance is
+            # |delta Z| * ||K^-1 [u,v,1]||; no nearest-neighbor search is needed.
+            rays = depth_to_camera_points(torch.ones_like(prediction), flat_k, self.pixel_center_offset)
+            distance_m = (prediction - safe_sparse).abs() * torch.linalg.vector_norm(rays, dim=1, keepdim=True)
+            residual = distance_m / self.point_fit_scale_m
+            point_fit_loss = _masked_mean(F.smooth_l1_loss(residual, torch.zeros_like(residual),
+                reduction="none", beta=1.), weights)
+            # A 30-degree disagreement has normalized normal loss ~= 1;
+            # a 5 cm point error has normalized Huber loss ~= 0.5.
+            normalized_normal = normal_consistency_loss / (1 - 0.8660254)
+            output.update(loss=self.normal_weight * normalized_normal + self.sparse_depth_weight * point_fit_loss,
+                normal_consistency_loss=normalized_normal, normal_error_raw=normal_consistency_loss,
+                point_fit_loss=point_fit_loss, point_fit_mae_m=_masked_mean(distance_m, weights),
+                anchor_weights=confidence.reshape(expected_depth_shape),
+                point_fit_weights=weights.reshape(expected_depth_shape),
+                predicted_normals=normals.reshape(batch, views, 3, height, width),
+                normal_targets=target_normals.reshape(batch, views, 3, height, width))
+            return output
 
         depth_mask = (
             depth_supervision_mask & sparse_valid

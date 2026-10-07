@@ -1,4 +1,4 @@
-"""TaskNet/CGA+DINOv3 + PTv3 geometry pretraining with three workspace losses."""
+"""Normal-filtered PTv3 geometry training with two weighted workspace losses."""
 from __future__ import annotations
 import argparse
 import json
@@ -28,6 +28,9 @@ def main():
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--max-steps", type=int, default=0)
     parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--supervision-mode", choices=("weighted_workspace",), default="weighted_workspace")
+    parser.add_argument("--point-fit-scale-m", type=float, default=0.05)
+    parser.add_argument("--inconsistent-point-weight", type=float, default=0.1)
     parser.add_argument("--probe-seconds", type=float, default=0)
     parser.add_argument("--save-steps", type=int, default=250)
     parser.add_argument("--validate-every-epochs", type=int, default=1)
@@ -58,7 +61,9 @@ def main():
         return DataLoader(dataset, **kwargs)
     train_loader, val_loader = loader(train, True), loader(val, False)
     model = WorkspaceGeometryModel(args.backbone, args.teacher_checkpoint,
-        args.concerto_checkpoint, args.dino_weights).cuda()
+        args.concerto_checkpoint, args.dino_weights, supervision_mode=args.supervision_mode,
+        point_fit_scale_m=args.point_fit_scale_m,
+        inconsistent_point_weight=args.inconsistent_point_weight).cuda()
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
         lr=args.lr, weight_decay=.01, fused=True)
     max_steps = args.max_steps or args.epochs * len(train_loader)
@@ -123,10 +128,12 @@ def main():
             step_times.append(time.monotonic() - tick)
             if step % 5 == 0:
                 record = {k: float(output[k].detach()) for k in
-                    ("loss", "normal_consistency_loss", "holdout_depth_loss", "anchor_depth_loss")}
+                    ("loss", "normal_consistency_loss", "normal_error_raw", "point_fit_loss", "point_fit_mae_m")}
                 record.update(step=step, lr=scheduler.get_last_lr()[0], elapsed=time.monotonic()-started,
                     max_steps=max_steps, peak_memory_gb=torch.cuda.max_memory_allocated()/2**30,
-                    anchors=float((output["anchor_weights"] > 0).sum())/args.batch_size)
+                    anchors=float((output["anchor_weights"] > 0).sum())/len(output["input_point_counts"]),
+                    input_points_mean=float(output["input_point_counts"].float().mean()),
+                    input_points_min=int(output["input_point_counts"].min()))
                 with metrics.open("a") as stream:
                     stream.write(json.dumps(record) + "\n")
                 print(json.dumps(record), flush=True)

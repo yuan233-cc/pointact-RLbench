@@ -3,6 +3,16 @@
 set -euo pipefail
 hostname
 [[ "${SLURM_JOB_ID:-}" =~ ^[0-9]+$ ]]
+release_job() {
+  status=$?
+  if [[ "${GEOMETRY_RELEASE_JOB:-0}" == 1 ]]; then
+    scancel "$SLURM_JOB_ID" || true
+  fi
+  exit "$status"
+}
+trap release_job EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 storage=/local
 storage_mount=(--mount /local:/local)
 if [[ "$(hostname -s)" != aachen ]]; then
@@ -42,8 +52,4 @@ enroot start --root --rw --mount /mnt:/mnt "${storage_mount[@]}" --mount /tmp:/t
   --output-dir "$output" "$@"
 status=$?
 set -e
-# Probes are managed by the caller; final runs release even after an error.
-if [[ "${GEOMETRY_RELEASE_JOB:-0}" == 1 ]]; then
-  scancel "$SLURM_JOB_ID"
-fi
 exit "$status"

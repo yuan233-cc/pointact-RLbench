@@ -30,31 +30,44 @@ from its checkpoint with the first six stem channels copied and added polar
 columns zeroed. Inputs are workspace-filtered incomplete XYZRGB+polar points,
 up to 4096 per sample; saved current-observation pixel IDs remain aligned.
 
-## Exactly three active objectives
+## Normal-filtered input and exactly two active objectives
 
-`loss = normal_consistency + 0.2 * holdout_depth + 0.05 * visible_anchor_depth`.
-Smoothness is disabled. Geometry operations and log residuals run in FP32.
+The default `weighted_workspace` protocol has no held-out depth, no GT targets,
+and no smoothness loss. A detached sensor/teacher normal confidence `q` is
+computed once before PTv3. Boundary-safe neighbors within six pixels reject
+depth jumps over `0.01 + 0.02 * depth` metres. Agreement within 30 degrees
+produces positive confidence; only those point rows enter PTv3. Pixel IDs are
+filtered with the same row mask. Empty trusted samples raise an explicit error;
+rejected points are never substituted to manufacture a point count. Centering
+uses retained points and composes camera transforms in FP32.
+
+`loss = normal_consistency / (1-cos(30deg)) + weighted_point_fit`.
+Both coefficients are one. The point term is Huber with beta=1 applied to 3D
+distance divided by `--point-fit-scale-m` (default 0.05 m). Along each calibrated
+pixel ray this distance is `abs(predicted_Z - observed_Z) * norm(ray)`. A 30-degree
+normal error scores about 1; a 5 cm point error scores 0.5. These fixed reference
+scales make terms comparable, not guaranteed equal on every batch. Logs retain
+raw normal error and weighted metric point MAE. Huber retains a corrective
+gradient for large offsets, unlike the old redescending Cauchy objective.
 
 * Normal consistency: depth-derived normals versus frozen teacher normals,
   masked to the workspace image envelope, ray/AABB intersection and optical
   validity. Require the normal stencil to remain inside that mask.
-* Holdout depth: randomly select whole 8px blocks, remove their source points
-  **before PTv3**, and retain exactly that mask for loss. Targets are only the
-  incomplete sensor measurements before subsampling, never clean depth.
-  Compute point centering only after holdout removal, from visible points;
-  compose camera extrinsics in FP32 so centering cannot leak held-out statistics
-  or introduce BF16 pixel-correspondence errors.
-* Visible anchors: detached confidence from boundary-safe sensor normals and
-  teacher agreement within 30 degrees. Find valid neighbors within six pixels
-  and reject depth jumps; use Cauchy log-depth residuals. No forced minimum
-  anchor count and no fallback that labels unverified points as trusted.
+* Weighted point fit: ALL valid observed workspace pixels before point
+  subsampling, including observations rejected from PTv3. Weight is
+  `0.1 + 0.9*q` by default (`--inconsistent-point-weight` controls the floor).
+  Normalize by the sum of weights. Saved pixel correspondence replaces costly
+  nearest-neighbor matching. Raster collisions use the nearest visible sensor
+  depth, not occluded surfaces. No observed or clean depth is fed to the decoder.
 
-Both depth terms preserve the sensor's uncertainty: local normal agreement
+The weights preserve the sensor's uncertainty: local normal agreement
 cannot certify absolute depth or reject every coherent region-wide offset.
 No complete-depth or GT-normal sidecar is opened by this training dataset.
 Episode-disjoint validation holds out episode IDs ending in 9.
-Validation also removes a deterministic structured holdout before PTv3, rather
-than measuring reconstruction of observations that remain in its input.
+Validation uses the same normal-filtering protocol, with no hidden-depth mask.
+Observed-point fitting measures reconstruction, not unseen-hole accuracy.
+Legacy checkpoints without `supervision_mode` still evaluate with their original
+three-term structured-holdout protocol; their training semantics are not changed.
 
 ## Runtime
 

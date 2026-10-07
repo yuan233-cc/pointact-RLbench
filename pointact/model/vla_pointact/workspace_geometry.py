@@ -10,14 +10,14 @@ from .action_head_3d.polarapp_tasknet_encoder import PolarAppTaskAwareEncoder, l
 from .action_head_3d.cga_dino_normal import CgaDinoNormalNet, load_cga_dino_normal_checkpoint
 from .action_head_3d.polar_depth_self_supervision import (
     PolarDepthSelfSupervision, structured_depth_holdout,
-    mask_points_at_depth_targets, rasterize_fused_point_features,
+    mask_points_at_depth_targets, rasterize_fused_point_features, normal_anchor_confidence,
 )
 from pointact.train.ptv3_init import adapt_ptv3_input_stem
 
 
 @torch.autocast("cuda", enabled=False)
 def center_visible_points(points, counts, camera_from_world):
-    """Center after holdout so removed depths cannot enter input statistics."""
+    """Center retained points and preserve their exact camera coordinates."""
     batch_ids = torch.repeat_interleave(torch.arange(len(counts), device=points.device), counts)
     centers = points.new_zeros((len(counts), 3))
     centers.index_add_(0, batch_ids, points[:, :3])
@@ -44,11 +44,32 @@ def frozen_cga_features(teacher, observation, prior, rgb, chunk_size=224):
     return torch.cat(normals), tuple(torch.cat([bank[i] for bank in banks]) for i in range(5))
 
 
+def filter_normal_consistent_points(points, counts, pixels, confidence):
+    """Filter by saved pixel identity; never fill empty samples with rejected points."""
+    if confidence.ndim != 5 or confidence.shape[1:3] != (1, 1):
+        raise ValueError("Expected single-view confidence [B,1,1,H,W]")
+    if len(pixels) != len(points) or int(counts.sum()) != len(points):
+        raise ValueError("Point rows, pixel IDs and counts must agree")
+    ids = torch.arange(len(counts), device=points.device).repeat_interleave(counts.long())
+    flat = confidence.detach().flatten(1)
+    if ((pixels < 0) | (pixels >= flat.shape[1])).any():
+        raise ValueError("Point pixel ID is outside the teacher image")
+    keep = flat[ids, pixels.long()] > 0
+    selected_counts = torch.bincount(ids[keep], minlength=len(counts)).to(counts.dtype)
+    if (selected_counts == 0).any():
+        empty = torch.nonzero(selected_counts == 0).flatten().tolist()
+        raise ValueError(f"No normal-consistent PTv3 points in batch rows {empty}; do not substitute untrusted points")
+    return points[keep], selected_counts, keep
+
+
 class WorkspaceGeometryModel(nn.Module):
     """No language/action tokens. Both teachers retain checkpoint preprocessing."""
-    def __init__(self, backbone, checkpoint, concerto_checkpoint, dino_weights=None):
+    def __init__(self, backbone, checkpoint, concerto_checkpoint, dino_weights=None,
+                 supervision_mode="weighted_workspace", point_fit_scale_m=0.05,
+                 inconsistent_point_weight=0.1):
         super().__init__()
         self.backbone = backbone
+        self.supervision_mode = supervision_mode
         if backbone == "tasknet":
             self.teacher = PolarAppTaskAwareEncoder(input_mode="native_stokes")
             load_polarapp_tasknet_checkpoint(self.teacher, checkpoint, require_normal_head=True)
@@ -84,8 +105,11 @@ class WorkspaceGeometryModel(nn.Module):
         module.load_state_dict(compatible, strict=False)
         self.objective = PolarDepthSelfSupervision(feature_channels=channels,
             point_feature_channels=(64, 128, 256, 512, 768),
-            normal_weight=1.0, sparse_depth_weight=0.2, anchor_depth_weight=0.05,
-            smoothness_weight=0.0, use_polar_features=False, pixel_center_offset=0.0)
+            normal_weight=1.0, sparse_depth_weight=1.0 if supervision_mode == "weighted_workspace" else 0.2,
+            anchor_depth_weight=0.05 if supervision_mode == "legacy" else 0.0,
+            smoothness_weight=0.0, use_polar_features=False, pixel_center_offset=0.0,
+            supervision_mode=supervision_mode, point_fit_scale_m=point_fit_scale_m,
+            inconsistent_point_weight=inconsistent_point_weight)
 
     def train(self, mode=True):
         super().train(mode)
@@ -120,11 +144,22 @@ class WorkspaceGeometryModel(nn.Module):
             polar_feature_offsets=tuple(offsets[i] for i in self.mapping),
             polar_image_hw=batch["point_pixel_image_hw"])
         valid = batch["observed_depth_valid"] & batch["polar_workspace_mask"].unsqueeze(2) & batch["pixel_valid"].unsqueeze(2)
-        generator = None if self.training else torch.Generator(device=valid.device).manual_seed(173)
-        hidden = structured_depth_holdout(valid, 0.7, generator=generator)
-        points, counts, keep = mask_points_at_depth_targets(batch["points"], batch["npoints_in_batch"], hidden,
-            context["polar_K"], context["T_camera_from_model"], context["view_valid"],
-            point_pixel_indices=context["point_pixel_indices"], point_pixel_image_hw=context["point_pixel_image_hw"])
+        valid &= context["view_valid"][:, :, None, None, None].bool()
+        confidence, hidden = None, None
+        if self.supervision_mode == "weighted_workspace":
+            with torch.no_grad():
+                safe_depth = torch.where(valid, batch["observed_depth"], torch.ones_like(batch["observed_depth"]))
+                confidence = normal_anchor_confidence(safe_depth[:, 0].float(), context["polar_K"][:, 0].float(),
+                    normal.float(), valid[:, 0], pixel_center_offset=0.0)[:, None]
+                confidence = torch.nan_to_num(confidence, nan=0., posinf=0., neginf=0.)
+            points, counts, keep = filter_normal_consistent_points(batch["points"], batch["npoints_in_batch"],
+                context["point_pixel_indices"], confidence)
+        else:
+            generator = None if self.training else torch.Generator(device=valid.device).manual_seed(173)
+            hidden = structured_depth_holdout(valid, 0.7, generator=generator)
+            points, counts, keep = mask_points_at_depth_targets(batch["points"], batch["npoints_in_batch"], hidden,
+                context["polar_K"], context["T_camera_from_model"], context["view_valid"],
+                point_pixel_indices=context["point_pixel_indices"], point_pixel_image_hw=context["point_pixel_image_hw"])
         if (counts < 1).any():
             raise ValueError("Holdout removed all points of a sample; use smaller blocks")
         points, context["T_camera_from_model"] = center_visible_points(
@@ -137,8 +172,10 @@ class WorkspaceGeometryModel(nn.Module):
             context["T_camera_from_model"], context["polar_image_hw"], context["view_valid"],
             feature_strides=context["polar_feature_strides"], feature_offsets=context["polar_feature_offsets"],
             correspondence_mode="workspace")
-        return self.objective(None, maps, masks, images, context["polar_K"],
+        result = self.objective(None, maps, masks, images, context["polar_K"],
             observed_depth=batch["observed_depth"], observed_depth_valid=valid,
             pixel_valid=context["pixel_valid"], view_valid=context["view_valid"],
             depth_supervision_mask=hidden, normal_targets=normal[:, None],
-            workspace_mask=context["polar_workspace_mask"])
+            workspace_mask=context["polar_workspace_mask"], observation_confidence=confidence)
+        result["input_point_counts"] = counts.detach()
+        return result
