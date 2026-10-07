@@ -18,6 +18,7 @@ WORKSPACE = np.array([[-.5, 1.5], [-1., 1.], [.7505, 2.]], dtype=np.float32)
 class WorkspaceGeometryDataset(Dataset):
     def __init__(self, root, backbone, split="train", max_points=4096, cga_records=None):
         self.root = Path(root)
+        self.split = split
         self.backbone, self.max_points = backbone, max_points
         self.cga_records = Path(cga_records) if cga_records else None
         self.envs, self.video_cache = {}, {}
@@ -107,7 +108,8 @@ class WorkspaceGeometryDataset(Dataset):
         rows, cols = pixels // width, pixels % width
         envelope[rows.min():rows.max()+1, cols.min():cols.max()+1] = True
         workspace &= envelope
-        sampled = np.random.choice(len(points), min(len(points), self.max_points), replace=False)
+        rng = np.random.default_rng(index) if self.split == "val" else np.random
+        sampled = rng.choice(len(points), min(len(points), self.max_points), replace=False)
         points, pixels = points[sampled], pixels[sampled]
         points[:, 3:6] = 2 * points[:, 3:6] - 1
         points[:, 6] = 2 * points[:, 6] - 1

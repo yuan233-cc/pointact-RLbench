@@ -367,11 +367,11 @@ def _masked_mean(values: Tensor, weights: Tensor) -> Tensor:
     return (values * weights).sum() / weights.sum().clamp_min(1.0)
 
 
-def structured_depth_holdout(valid: Tensor, keep_probability: float, block_size: int = 8) -> Tensor:
+def structured_depth_holdout(valid: Tensor, keep_probability: float, block_size: int = 8, generator=None) -> Tensor:
     """Select whole image blocks before PTv3; callers remove their source points."""
     height, width = valid.shape[-2:]
     coarse = torch.rand((*valid.shape[:-2], (height + block_size - 1) // block_size,
-                         (width + block_size - 1) // block_size), device=valid.device)
+                         (width + block_size - 1) // block_size), device=valid.device, generator=generator)
     hidden = (coarse >= keep_probability).repeat_interleave(block_size, -2).repeat_interleave(block_size, -1)
     return valid.bool() & hidden[..., :height, :width]
 
@@ -522,7 +522,8 @@ class PolarDepthSelfSupervision(nn.Module):
                 else:
                     depth_supervision_mask = depth_supervision_mask.reshape_as(sparse).bool()
             else:
-                depth_supervision_mask = sparse_valid
+                depth_supervision_mask = (sparse_valid if depth_supervision_mask is None
+                                          else depth_supervision_mask.reshape_as(sparse).bool())
 
         prediction, decoded = self.decoder(
             flat_levels,

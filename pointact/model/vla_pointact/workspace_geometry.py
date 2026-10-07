@@ -93,7 +93,8 @@ class WorkspaceGeometryModel(nn.Module):
             polar_feature_offsets=tuple(offsets[i] for i in self.mapping),
             polar_image_hw=batch["point_pixel_image_hw"])
         valid = batch["observed_depth_valid"] & batch["polar_workspace_mask"].unsqueeze(2) & batch["pixel_valid"].unsqueeze(2)
-        hidden = structured_depth_holdout(valid, 0.7) if self.training else torch.zeros_like(valid)
+        generator = None if self.training else torch.Generator(device=valid.device).manual_seed(173)
+        hidden = structured_depth_holdout(valid, 0.7, generator=generator)
         points, counts, keep = mask_points_at_depth_targets(batch["points"], batch["npoints_in_batch"], hidden,
             context["polar_K"], context["T_camera_from_model"], context["view_valid"],
             point_pixel_indices=context["point_pixel_indices"], point_pixel_image_hw=context["point_pixel_image_hw"])

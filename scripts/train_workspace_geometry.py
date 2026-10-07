@@ -68,7 +68,10 @@ def main():
         model.load_state_dict(state["model"], strict=False)
         optimizer.load_state_dict(state["optimizer"])
         scheduler.load_state_dict(state["scheduler"])
-        step, best = state["step"], state["best"]
+        step = state["step"]
+        # A resumed run has a fresh output directory and validation protocol;
+        # select its best checkpoint locally rather than inheriting a stale score.
+        best = float("inf")
     run = None
     if args.report_to == "wandb":
         import wandb
