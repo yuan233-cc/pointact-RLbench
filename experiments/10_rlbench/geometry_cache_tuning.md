@@ -15,6 +15,14 @@ All available workspace points are cached before the usual random <=4096
 sampling, so cache creation does not freeze a subsample of a larger point set.
 The frozen teacher can stay on CPU during student training.
 
+Cache generation uses one LMDB dataset instance for both frame-key splits,
+avoiding a duplicate environment open when a worker crosses train/validation.
+With `--scratch-dir`, build on Job-local SSD and publish each column through
+byte-size/SHA256 verification followed by an atomic directory rename. An
+explicit interrupted prefix can be reused only after its first/last complete
+teacher batches, calibrated observations, masks and point/pixel pairs pass
+recomputation checks; the old interrupted cache is preserved.
+
 `benchmark_workspace_geometry.py` completes real forward/backward/optimizer
 steps for increasing physical batches. Choose the highest measured samples/s
 with at least 8% CUDA reserved-memory headroom, not merely the largest batch.
