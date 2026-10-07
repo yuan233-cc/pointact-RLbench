@@ -44,7 +44,7 @@ def frozen_cga_features(teacher, observation, prior, rgb, chunk_size=224):
     return torch.cat(normals), tuple(torch.cat([bank[i] for bank in banks]) for i in range(5))
 
 
-def filter_normal_consistent_points(points, counts, pixels, confidence):
+def filter_normal_consistent_points(points, counts, pixels, confidence, allow_empty=False):
     """Filter by saved pixel identity; never fill empty samples with rejected points."""
     if confidence.ndim != 5 or confidence.shape[1:3] != (1, 1):
         raise ValueError("Expected single-view confidence [B,1,1,H,W]")
@@ -56,7 +56,7 @@ def filter_normal_consistent_points(points, counts, pixels, confidence):
         raise ValueError("Point pixel ID is outside the teacher image")
     keep = flat[ids, pixels.long()] > 0
     selected_counts = torch.bincount(ids[keep], minlength=len(counts)).to(counts.dtype)
-    if (selected_counts == 0).any():
+    if not allow_empty and (selected_counts == 0).any():
         empty = torch.nonzero(selected_counts == 0).flatten().tolist()
         raise ValueError(f"No normal-consistent PTv3 points in batch rows {empty}; do not substitute untrusted points")
     return points[keep], selected_counts, keep
@@ -146,6 +146,8 @@ class WorkspaceGeometryModel(nn.Module):
         valid = batch["observed_depth_valid"] & batch["polar_workspace_mask"].unsqueeze(2) & batch["pixel_valid"].unsqueeze(2)
         valid &= context["view_valid"][:, :, None, None, None].bool()
         confidence, hidden = None, None
+        observed_depth = batch["observed_depth"]
+        skipped_samples = 0
         if self.supervision_mode == "weighted_workspace":
             with torch.no_grad():
                 safe_depth = torch.where(valid, batch["observed_depth"], torch.ones_like(batch["observed_depth"]))
@@ -153,18 +155,31 @@ class WorkspaceGeometryModel(nn.Module):
                     normal.float(), valid[:, 0], pixel_center_offset=0.0)[:, None]
                 confidence = torch.nan_to_num(confidence, nan=0., posinf=0., neginf=0.)
             points, counts, keep = filter_normal_consistent_points(batch["points"], batch["npoints_in_batch"],
-                context["point_pixel_indices"], confidence)
+                context["point_pixel_indices"], confidence, allow_empty=True)
         else:
             generator = None if self.training else torch.Generator(device=valid.device).manual_seed(173)
             hidden = structured_depth_holdout(valid, 0.7, generator=generator)
             points, counts, keep = mask_points_at_depth_targets(batch["points"], batch["npoints_in_batch"], hidden,
                 context["polar_K"], context["T_camera_from_model"], context["view_valid"],
                 point_pixel_indices=context["point_pixel_indices"], point_pixel_image_hw=context["point_pixel_image_hw"])
-        if (counts < 1).any():
-            raise ValueError("Holdout removed all points of a sample; use smaller blocks")
+        context["point_pixel_indices"] = context["point_pixel_indices"][keep]
+        active = counts > 0
+        if not active.all():
+            if not active.any():
+                raise ValueError("Entire batch has no normal-consistent points; refusing untrusted fallback")
+            skipped_samples = int((~active).sum())
+            counts = counts[active]
+            images, normal, valid = images[active], normal[active], valid[active]
+            observed_depth, confidence = observed_depth[active], confidence[active]
+            for key in ("polar_K", "T_camera_from_model", "view_valid", "pixel_valid",
+                        "polar_workspace_mask", "point_pixel_image_hw", "polar_image_hw"):
+                context[key] = context[key][active]
+            bank = tuple(f[active] for f in bank)
+            references = tuple(bank[i] for i in self.mapping)
+            context.update(polar_feature_levels=references, polar_bbox_feature_bank=bank)
+            b = len(counts)
         points, context["T_camera_from_model"] = center_visible_points(
             points, counts, context["T_camera_from_model"])
-        context["point_pixel_indices"] = context["point_pixel_indices"][keep]
         # Explicit empty sequences: attention contains only point tokens.
         output = self.ptv3_model(points, counts, points.new_empty((b, 0, 256)),
             counts.new_zeros(b), points.new_empty((b, 0, 64)), polar_context=context, return_stage_points=True)
@@ -173,9 +188,10 @@ class WorkspaceGeometryModel(nn.Module):
             feature_strides=context["polar_feature_strides"], feature_offsets=context["polar_feature_offsets"],
             correspondence_mode="workspace")
         result = self.objective(None, maps, masks, images, context["polar_K"],
-            observed_depth=batch["observed_depth"], observed_depth_valid=valid,
+            observed_depth=observed_depth, observed_depth_valid=valid,
             pixel_valid=context["pixel_valid"], view_valid=context["view_valid"],
             depth_supervision_mask=hidden, normal_targets=normal[:, None],
             workspace_mask=context["polar_workspace_mask"], observation_confidence=confidence)
         result["input_point_counts"] = counts.detach()
+        result["skipped_samples"] = counts.new_tensor(skipped_samples)
         return result

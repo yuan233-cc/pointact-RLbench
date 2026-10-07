@@ -12,6 +12,8 @@ def test_normal_filter_preserves_pixel_rows_and_rejects_empty_samples():
     assert selected_counts.tolist() == [2, 1]
     assert pixels[keep].tolist() == [0, 2, 1]
     confidence[1] = 0
+    _, counts_with_empty, _ = filter_normal_consistent_points(points, counts, pixels, confidence, allow_empty=True)
+    assert counts_with_empty.tolist() == [2, 0]
     try:
         filter_normal_consistent_points(points, counts, pixels, confidence)
     except ValueError as error:

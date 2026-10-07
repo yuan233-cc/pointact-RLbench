@@ -133,7 +133,8 @@ def main():
                     max_steps=max_steps, peak_memory_gb=torch.cuda.max_memory_allocated()/2**30,
                     anchors=float((output["anchor_weights"] > 0).sum())/len(output["input_point_counts"]),
                     input_points_mean=float(output["input_point_counts"].float().mean()),
-                    input_points_min=int(output["input_point_counts"].min()))
+                    input_points_min=int(output["input_point_counts"].min()),
+                    skipped_samples=int(output["skipped_samples"]))
                 with metrics.open("a") as stream:
                     stream.write(json.dumps(record) + "\n")
                 print(json.dumps(record), flush=True)

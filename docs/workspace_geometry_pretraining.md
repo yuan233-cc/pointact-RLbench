@@ -37,8 +37,9 @@ and no smoothness loss. A detached sensor/teacher normal confidence `q` is
 computed once before PTv3. Boundary-safe neighbors within six pixels reject
 depth jumps over `0.01 + 0.02 * depth` metres. Agreement within 30 degrees
 produces positive confidence; only those point rows enter PTv3. Pixel IDs are
-filtered with the same row mask. Empty trusted samples raise an explicit error;
-rejected points are never substituted to manufacture a point count. Centering
+filtered with the same row mask. Empty trusted samples are excluded from the
+batch and counted in `skipped_samples`; an entirely empty batch raises an error.
+Rejected points are never substituted to manufacture a point count. Centering
 uses retained points and composes camera transforms in FP32.
 
 `loss = normal_consistency / (1-cos(30deg)) + weighted_point_fit`.
