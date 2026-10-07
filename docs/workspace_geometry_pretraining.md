@@ -41,6 +41,9 @@ Smoothness is disabled. Geometry operations and log residuals run in FP32.
 * Holdout depth: randomly select whole 8px blocks, remove their source points
   **before PTv3**, and retain exactly that mask for loss. Targets are only the
   incomplete sensor measurements before subsampling, never clean depth.
+  Compute point centering only after holdout removal, from visible points;
+  compose camera extrinsics in FP32 so centering cannot leak held-out statistics
+  or introduce BF16 pixel-correspondence errors.
 * Visible anchors: detached confidence from boundary-safe sensor normals and
   teacher agreement within 30 degrees. Find valid neighbors within six pixels
   and reject depth jumps; use Cauchy log-depth residuals. No forced minimum

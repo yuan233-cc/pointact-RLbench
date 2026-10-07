@@ -113,13 +113,9 @@ class WorkspaceGeometryDataset(Dataset):
         points, pixels = points[sampled], pixels[sampled]
         points[:, 3:6] = 2 * points[:, 3:6] - 1
         points[:, 6] = 2 * points[:, 6] - 1
-        center = points[:, :3].mean(0)
-        points[:, :3] -= center
-        camera_from_model = transform.copy()
-        camera_from_model[:3, 3] += transform[:3, :3] @ center
         out = dict(points=points, point_pixel_indices=pixels,
             polar_images=np.concatenate((intensity[None], dolp[None], cos2[None], sin2[None], unit_rays))[None],
-            polar_K=k[None], T_camera_from_model=camera_from_model[None], view_valid=np.ones(1, bool),
+            polar_K=k[None], T_camera_from_model=transform[None], view_valid=np.ones(1, bool),
             pixel_valid=pixel_valid[None], polar_workspace_mask=workspace[None],
             observed_depth=depth.reshape(1, 1, height, width), observed_depth_valid=observed_valid.reshape(1, 1, height, width),
             point_pixel_image_hw=np.array([[height, width]], dtype=np.int64))

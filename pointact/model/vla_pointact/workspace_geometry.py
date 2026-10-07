@@ -15,6 +15,20 @@ from .action_head_3d.polar_depth_self_supervision import (
 from pointact.train.ptv3_init import adapt_ptv3_input_stem
 
 
+@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+def center_visible_points(points, counts, camera_from_world):
+    """Center after holdout so removed depths cannot enter input statistics."""
+    batch_ids = torch.repeat_interleave(torch.arange(len(counts), device=points.device), counts)
+    centers = points.new_zeros((len(counts), 3))
+    centers.index_add_(0, batch_ids, points[:, :3])
+    centers = centers / counts[:, None].to(points.dtype)
+    centered = points.clone()
+    centered[:, :3] -= centers[batch_ids]
+    transform = camera_from_world.clone()
+    transform[:, :, :3, 3] += torch.einsum("bvij,bj->bvi", transform[:, :, :3, :3], centers)
+    return centered, transform
+
+
 @torch.no_grad()
 def frozen_cga_features(teacher, observation, prior, rgb, chunk_size=224):
     """Keep native teacher resolution without large convolution index tensors."""
@@ -113,6 +127,8 @@ class WorkspaceGeometryModel(nn.Module):
             point_pixel_indices=context["point_pixel_indices"], point_pixel_image_hw=context["point_pixel_image_hw"])
         if (counts < 1).any():
             raise ValueError("Holdout removed all points of a sample; use smaller blocks")
+        points, context["T_camera_from_model"] = center_visible_points(
+            points, counts, context["T_camera_from_model"])
         context["point_pixel_indices"] = context["point_pixel_indices"][keep]
         # Explicit empty sequences: attention contains only point tokens.
         output = self.ptv3_model(points, counts, points.new_empty((b, 0, 256)),
