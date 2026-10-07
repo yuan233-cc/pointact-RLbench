@@ -190,9 +190,9 @@ def main():
                     suggested_wall_seconds=math.ceil((max_steps-step)*seconds_per_step*1.05 + 2400))
                 (args.output_dir / "timing_estimate.json").write_text(json.dumps(estimate, indent=2))
                 print("PROBE_COMPLETE=" + json.dumps(estimate), flush=True)
+                set_phase("complete")
                 if run:
                     run.finish()
-                set_phase("complete")
                 return
             if step >= max_steps:
                 break
