@@ -182,4 +182,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        # DataLoader/W&B teardown can otherwise hang after a fatal exception,
+        # leaving the SSH allocation idle. The host supervisor cancels the
+        # dedicated allocation when this foreground process exits, including
+        # any remaining worker processes. Never write a checkpoint on failure.
+        import sys
+        import traceback
+        traceback.print_exc()
+        sys.stderr.flush()
+        sys.stdout.flush()
+        os._exit(1)
