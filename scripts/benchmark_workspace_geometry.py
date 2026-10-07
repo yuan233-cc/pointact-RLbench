@@ -46,7 +46,7 @@ def main():
     for batch_size in a.batch_sizes:
         # Recreate only the loader, not another multi-GB model or teacher.
         loader = DataLoader(dataset, batch_size=batch_size, num_workers=a.workers, shuffle=True,
-            collate_fn=collate_geometry, pin_memory=True,
+            collate_fn=collate_geometry, pin_memory=True, persistent_workers=a.workers > 0,
             **({"prefetch_factor": 2} if a.workers else {}))
         iterator = iter(loader)
         torch.cuda.reset_peak_memory_stats()
