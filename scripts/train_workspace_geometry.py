@@ -213,6 +213,15 @@ def main():
         set_phase("checkpoint")
         save("last.pt")
         model.train()
+    if args.probe_seconds:
+        elapsed = time.monotonic() - started
+        seconds_per_step = elapsed / max(1, step - (state["step"] if args.resume else 0))
+        estimate = dict(step=step, max_steps=max_steps, seconds_per_step=seconds_per_step,
+            gpu_step_median=float(np.median(step_times[5:] or step_times)),
+            remaining_seconds=0, full_training_seconds=elapsed, suggested_wall_seconds=2400,
+            completed=True)
+        (args.output_dir / "timing_estimate.json").write_text(json.dumps(estimate, indent=2))
+        print("PROBE_COMPLETE=" + json.dumps(estimate), flush=True)
     set_phase("complete")
     print(f"TRAINING_COMPLETE step={step}", flush=True)
     if run:
