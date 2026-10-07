@@ -39,7 +39,9 @@ def main():
     window = []
     while alive():
         before = phase()
-        time.sleep(5)
+        # Short prefetched epochs can last <20 seconds. Sample each second so
+        # phase transitions do not discard most of the active training window.
+        time.sleep(1)
         after = phase()
         if after.get("phase") == "complete" and time.time()-after.get("updated", time.time()) > 60:
             print(f"FINAL_LOG_SYNC_TIMEOUT_RELEASE job={a.job}", flush=True)
@@ -57,7 +59,7 @@ def main():
             "--format=csv,noheader,nounits"], text=True)
         devices = [[float(x) for x in line.split(",")] for line in raw.strip().splitlines()]
         window.append(devices)
-        if len(window) < 60:
+        if len(window) < 300:
             continue
         averages = [dict(compute_percent=sum(row[i][0] for row in window)/len(window),
             memory_percent=sum(row[i][1]/row[i][2]*100 for row in window)/len(window))
