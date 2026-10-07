@@ -22,6 +22,8 @@ polar adapters/cross-attention, and the metric depth decoder are trained.
   trainer preserves these rays; depth backprojection also uses the archived
   Coppelia integer-center calibration. TaskNet optical input retains its own
   established preprocessing independently of sensor backprojection.
+  Frozen CGA inference is chunked at 224 frames to avoid large convolution
+  indexing tensors; pooled features are reassembled before the full PTv3 batch.
 
 PTv3 uses the released large Concerto widths `64,128,256,512,768`, initialized
 from its checkpoint with the first six stem channels copied and added polar
@@ -48,6 +50,8 @@ Both depth terms preserve the sensor's uncertainty: local normal agreement
 cannot certify absolute depth or reject every coherent region-wide offset.
 No complete-depth or GT-normal sidecar is opened by this training dataset.
 Episode-disjoint validation holds out episode IDs ending in 9.
+Validation also removes a deterministic structured holdout before PTv3, rather
+than measuring reconstruction of observations that remain in its input.
 
 ## Runtime
 

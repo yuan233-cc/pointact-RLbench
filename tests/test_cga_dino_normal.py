@@ -36,6 +36,24 @@ class FakeDino(nn.Module):
         return tuple(outputs)
 
 
+def test_frozen_cga_chunking_preserves_normals_and_feature_bank():
+    from pointact.model.vla_pointact.workspace_geometry import frozen_cga_features
+
+    torch.manual_seed(42)
+    model = CgaDinoNormalNet(FakeDino(), observation_channels=7,
+                           physical_prior_channels=11, transformer_blocks=0).eval()
+    observation = torch.randn(2, 7, 64, 64)
+    prior = torch.randn(2, 11, 64, 64)
+    rgb = torch.rand(2, 3, 64, 64)
+    chunked = frozen_cga_features(model, observation, prior, rgb, chunk_size=1)
+    whole = frozen_cga_features(model, observation, prior, rgb, chunk_size=2)
+    torch.testing.assert_close(chunked[0], whole[0], atol=1e-5, rtol=1e-4)
+    for actual, expected in zip(chunked[1], whole[1], strict=True):
+        torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-4)
+        assert not actual.requires_grad
+    assert not chunked[0].requires_grad
+
+
 def test_dinov3_loader_uses_vendored_constructor_and_external_weights(monkeypatch, tmp_path):
     source = FakeDino()
     weights = tmp_path / "dinov3_convnext_base.pth"
