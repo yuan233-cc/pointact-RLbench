@@ -22,6 +22,13 @@ class WorkspaceGeometryDataset(Dataset):
         self.backbone, self.max_points = backbone, max_points
         self.cga_records = Path(cga_records) if cga_records else None
         self.envs, self.video_cache = {}, {}
+        sidecar = "tasknet_frontview_native_stokes" if backbone == "tasknet" else "sfp_frontview_rgb_luminance_proxy"
+        required = ["points_frontview_polar_incomplete9", "point_pixel_indices", sidecar]
+        if backbone == "cga_dinov3":
+            required.append("polar_frontview_dense")
+        missing = [name for name in required if not (self.root / name / "data.mdb").is_file()]
+        if missing:
+            raise FileNotFoundError(f"Wrong geometry dataset archive; missing input sidecars: {missing} at {self.root}")
         with lmdb.open(str(self.root / "points_frontview_polar_incomplete9"), readonly=True, lock=False) as env:
             keys = [key for key in env.begin().cursor().iternext(keys=True, values=False)
                     if key[:1].isdigit() and b"-" in key]
