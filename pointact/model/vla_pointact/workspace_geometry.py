@@ -15,6 +15,21 @@ from .action_head_3d.polar_depth_self_supervision import (
 from pointact.train.ptv3_init import adapt_ptv3_input_stem
 
 
+@torch.no_grad()
+def frozen_cga_features(teacher, observation, prior, rgb, chunk_size=224):
+    """Keep native teacher resolution without large convolution index tensors."""
+    if teacher.training:
+        raise ValueError("Chunked teacher must be in eval mode")
+    normals, banks = [], []
+    for start in range(0, len(observation), chunk_size):
+        section = slice(start, start + chunk_size)
+        result = teacher(observation[section], prior[section], rgb[section])
+        normals.append(result["normal"].float())
+        banks.append(tuple(F.avg_pool2d(f.float(), 4, 4) for f in result["feature_levels"]))
+        del result
+    return torch.cat(normals), tuple(torch.cat([bank[i] for bank in banks]) for i in range(5))
+
+
 class WorkspaceGeometryModel(nn.Module):
     """No language/action tokens. Both teachers retain checkpoint preprocessing."""
     def __init__(self, backbone, checkpoint, concerto_checkpoint, dino_weights=None):
@@ -76,10 +91,8 @@ class WorkspaceGeometryModel(nn.Module):
                 strides = tuple(4.0 * x for x in self.teacher.task_feature_strides)
                 offsets = (1.5,) * 3
             else:
-                result = self.teacher(batch["cga_observation"], batch["cga_prior"], batch["rgb"])
-                normal = result["normal"].float()
-                # Preserve 256px teacher inference, reduce attention memory only.
-                bank = tuple(F.avg_pool2d(f.float(), 4, 4) for f in result["feature_levels"])
+                normal, bank = frozen_cga_features(self.teacher, batch["cga_observation"],
+                    batch["cga_prior"], batch["rgb"])
                 strides = (4., 8., 16., 32., 64.)
                 # CGA's MaxPool2d(2) centers are (stride-1)/2.
                 offsets = tuple((s - 1) / 2 for s in strides)
