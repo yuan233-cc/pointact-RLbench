@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import math
 from pathlib import Path
 import numpy as np
 import torch
@@ -9,6 +10,25 @@ from torch.utils.data import Dataset
 from .observed_workspace_mask import operation_workspace
 
 CACHE_VERSION = "observed_neighbors_v1_frozen_teacher_fp32_v1"
+
+
+class PrefetchedEpochBatches:
+    """Keep workers prefetching across epochs, retaining each partial last batch."""
+    def __init__(self, frames, batch_size, epochs, seed=42):
+        if min(frames, batch_size, epochs) < 1:
+            raise ValueError("Positive frame, batch and epoch counts required")
+        self.frames, self.batch_size, self.epochs, self.seed = frames, batch_size, epochs, seed
+        self.steps_per_epoch = math.ceil(frames / batch_size)
+
+    def __len__(self):
+        return self.steps_per_epoch * self.epochs
+
+    def __iter__(self):
+        generator = torch.Generator().manual_seed(self.seed)
+        for _ in range(self.epochs):
+            indices = torch.randperm(self.frames, generator=generator).tolist()
+            for start in range(0, self.frames, self.batch_size):
+                yield indices[start:start+self.batch_size]
 
 
 def file_sha256(path):

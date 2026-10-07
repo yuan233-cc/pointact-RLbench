@@ -26,6 +26,12 @@ recomputation checks; the old interrupted cache is preserved.
 `benchmark_workspace_geometry.py` completes real forward/backward/optimizer
 steps for increasing physical batches. Choose the highest measured samples/s
 with at least 8% CUDA reserved-memory headroom, not merely the largest batch.
+Both benchmark and trainer use the same continuous epoch batch sampler: each
+epoch still visits every frame once and retains its smaller last batch, while
+workers can already prefetch the next epoch rather than waiting for a new
+DataLoader iterator. This is particularly useful when a large batch leaves only
+a few steps per epoch. Frame splits, losses and total epoch/sample counts do
+not change.
 Keep each probe output unique. Teacher caches are invalid when inputs,
 checkpoint, geometric preprocessing or teacher code change, and must not be
 used with online polar/RGB augmentation or teacher fine-tuning.

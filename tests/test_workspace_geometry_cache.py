@@ -1,7 +1,19 @@
 import tempfile
 from pathlib import Path
 import torch
-from pointact.data.workspace_geometry_cache import GeometryColumnWriter, CachedWorkspaceGeometryDataset
+from pointact.data.workspace_geometry_cache import GeometryColumnWriter, CachedWorkspaceGeometryDataset, PrefetchedEpochBatches
+
+
+def test_continuous_prefetch_keeps_every_frame_and_epoch_remainder():
+    sampler = PrefetchedEpochBatches(7, 3, 4, seed=13)
+    batches = list(sampler)
+    assert len(batches) == len(sampler) == 12
+    assert batches == list(sampler)
+    for epoch in range(4):
+        selected = batches[3*epoch:3*(epoch+1)]
+        assert [len(batch) for batch in selected] == [3, 3, 1]
+        assert sorted(i for batch in selected for i in batch) == list(range(7))
+    assert batches[:3] != batches[3:6]
 
 
 def test_column_cache_preserves_geometry_nan_teacher_and_split():

@@ -1,6 +1,7 @@
 """Normal-filtered PTv3 geometry training with two weighted workspace losses."""
 from __future__ import annotations
 import argparse
+import itertools
 import json
 import math
 import os
@@ -13,7 +14,7 @@ from torch.utils.data import DataLoader
 from pointact.data.workspace_geometry_dataset import WorkspaceGeometryDataset, collate_geometry
 from pointact.model.vla_pointact.workspace_geometry import WorkspaceGeometryModel
 from pointact.data.observed_workspace_mask import operation_workspace
-from pointact.data.workspace_geometry_cache import CachedWorkspaceGeometryDataset
+from pointact.data.workspace_geometry_cache import CachedWorkspaceGeometryDataset, PrefetchedEpochBatches
 
 
 def main():
@@ -66,10 +67,16 @@ def main():
     else:
         train = WorkspaceGeometryDataset(args.dataset_root, args.backbone, cga_records=args.cga_records)
         val = WorkspaceGeometryDataset(args.dataset_root, args.backbone, split="val", cga_records=args.cga_records)
+    epoch_steps = math.ceil(len(train) / args.batch_size)
+    max_steps = args.max_steps or args.epochs * epoch_steps
     def loader(dataset, shuffle):
-        kwargs = dict(batch_size=args.batch_size if shuffle else args.validation_batch_size,
-            shuffle=shuffle, num_workers=args.workers,
+        kwargs = dict(num_workers=args.workers,
             pin_memory=True, collate_fn=collate_geometry, persistent_workers=args.workers > 0)
+        if shuffle:
+            kwargs["batch_sampler"] = PrefetchedEpochBatches(len(dataset), args.batch_size,
+                math.ceil(max_steps/epoch_steps), args.seed)
+        else:
+            kwargs.update(batch_size=args.validation_batch_size, shuffle=False)
         if args.workers:
             kwargs["prefetch_factor"] = 2
         return DataLoader(dataset, **kwargs)
@@ -85,7 +92,6 @@ def main():
         torch.cuda.empty_cache()
     optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
         lr=args.lr, weight_decay=.01, fused=True)
-    max_steps = args.max_steps or args.epochs * len(train_loader)
     warmup = max(1, int(.03 * max_steps))
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
         lambda step: min(1., (step+1)/warmup) * .5 * (1 + math.cos(math.pi * max(0, step-warmup) / max(1, max_steps-warmup))))
@@ -132,12 +138,12 @@ def main():
     print(json.dumps(dict(train_frames=len(train), val_frames=len(val), max_steps=max_steps,
                          trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))), flush=True)
     model.train()
-    epoch = step // len(train_loader)
+    epoch = step // epoch_steps
+    iterator = iter(train_loader)
     while step < max_steps:
         set_phase("train")
-        iterator = iter(train_loader)
         previous = time.monotonic()
-        for batch in iterator:
+        for batch in itertools.islice(iterator, min(epoch_steps, max_steps-step)):
             tick = time.monotonic()
             data_wait = tick - previous
             optimizer.zero_grad(set_to_none=True)

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from pointact.data.workspace_geometry_cache import CachedWorkspaceGeometryDataset
+from pointact.data.workspace_geometry_cache import CachedWorkspaceGeometryDataset, PrefetchedEpochBatches
 from pointact.data.workspace_geometry_dataset import collate_geometry
 from pointact.model.vla_pointact.workspace_geometry import WorkspaceGeometryModel
 
@@ -45,14 +45,15 @@ def main():
     results = []
     for batch_size in a.batch_sizes:
         # Recreate only the loader, not another multi-GB model or teacher.
-        loader = DataLoader(dataset, batch_size=batch_size, num_workers=a.workers, shuffle=True,
+        batches = PrefetchedEpochBatches(len(dataset), batch_size, a.steps + 2)
+        loader = DataLoader(dataset, batch_sampler=batches, num_workers=a.workers,
             collate_fn=collate_geometry, pin_memory=True, persistent_workers=a.workers > 0,
             **({"prefetch_factor": 2} if a.workers else {}))
         iterator = iter(loader)
         torch.cuda.reset_peak_memory_stats()
         elapsed, waits, computes, samples = [], [], [], []
         output = batch = loss = cpu = None
-        record = dict(batch_size=batch_size, workers=a.workers)
+        record = dict(batch_size=batch_size, workers=a.workers, continuous_epoch_prefetch=True)
         try:
             for step in range(a.steps + 2):
                 tick = time.monotonic()
