@@ -15,7 +15,7 @@ from .action_head_3d.polar_depth_self_supervision import (
 from pointact.train.ptv3_init import adapt_ptv3_input_stem
 
 
-@torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+@torch.autocast("cuda", enabled=False)
 def center_visible_points(points, counts, camera_from_world):
     """Center after holdout so removed depths cannot enter input statistics."""
     batch_ids = torch.repeat_interleave(torch.arange(len(counts), device=points.device), counts)
