@@ -30,10 +30,13 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--probe-seconds", type=float, default=0)
     parser.add_argument("--save-steps", type=int, default=250)
+    parser.add_argument("--validate-every-epochs", type=int, default=1)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--report-to", choices=("wandb", "none"), default="wandb")
     args = parser.parse_args()
+    if args.validate_every_epochs < 1:
+        parser.error("--validate-every-epochs must be positive")
     if args.output_dir.exists():
         raise FileExistsError(args.output_dir)
     random.seed(args.seed)
@@ -100,6 +103,7 @@ def main():
     print(json.dumps(dict(train_frames=len(train), val_frames=len(val), max_steps=max_steps,
                          trainable_parameters=sum(p.numel() for p in model.parameters() if p.requires_grad))), flush=True)
     model.train()
+    epoch = step // len(train_loader)
     while step < max_steps:
         iterator = iter(train_loader)
         for batch in iterator:
@@ -145,6 +149,9 @@ def main():
                 return
             if step >= max_steps:
                 break
+        epoch += 1
+        if epoch % args.validate_every_epochs and step < max_steps:
+            continue
         model.eval()
         validation = []
         with torch.no_grad():
