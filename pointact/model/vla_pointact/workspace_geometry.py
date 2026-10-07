@@ -116,24 +116,36 @@ class WorkspaceGeometryModel(nn.Module):
         self.teacher.eval()
         return self
 
-    def forward(self, batch):
+    @torch.no_grad()
+    def encode_teacher(self, batch):
+        """Deterministic frozen outputs; safe to cache only without augmentation."""
         images = batch["polar_images"]
         size = images.shape[-1]
+        if self.teacher.training or any(p.requires_grad for p in self.teacher.parameters()):
+            raise RuntimeError("Only an eval-mode frozen teacher may be cached")
+        if self.backbone == "tasknet":
+            small = self.teacher.resize_sfp_observation(images[:, 0].float(), (64, 64))
+            bank = self.teacher.forward_task_features(small)
+            normal = self.teacher.decode_normals(bank, normalize=True, output_frame="canonical")
+            normal = F.normalize(F.interpolate(normal, (size, size), mode="bilinear", align_corners=False), dim=1)
+        else:
+            normal, bank = frozen_cga_features(self.teacher, batch["cga_observation"],
+                batch["cga_prior"], batch["rgb"])
+        return dict(teacher_normals=normal.float(),
+                    **{f"teacher_feature_{i}": f.float() for i, f in enumerate(bank)})
+
+    def forward(self, batch):
+        images = batch["polar_images"]
         b = len(images)
-        with torch.no_grad():
-            if self.backbone == "tasknet":
-                small = self.teacher.resize_sfp_observation(images[:, 0].float(), (64, 64))
-                bank = self.teacher.forward_task_features(small)
-                normal = self.teacher.decode_normals(bank, normalize=True, output_frame="canonical")
-                normal = F.normalize(F.interpolate(normal, (size, size), mode="bilinear", align_corners=False), dim=1)
-                strides = tuple(4.0 * x for x in self.teacher.task_feature_strides)
-                offsets = (1.5,) * 3
-            else:
-                normal, bank = frozen_cga_features(self.teacher, batch["cga_observation"],
-                    batch["cga_prior"], batch["rgb"])
-                strides = (4., 8., 16., 32., 64.)
-                # CGA's MaxPool2d(2) centers are (stride-1)/2.
-                offsets = tuple((s - 1) / 2 for s in strides)
+        encoded = batch if "teacher_normals" in batch else self.encode_teacher(batch)
+        normal = encoded["teacher_normals"].detach()
+        bank = tuple(encoded[f"teacher_feature_{i}"].detach() for i in range(3 if self.backbone == "tasknet" else 5))
+        if self.backbone == "tasknet":
+            strides = tuple(4.0 * x for x in self.teacher.task_feature_strides)
+            offsets = (1.5,) * 3
+        else:
+            strides = (4., 8., 16., 32., 64.)
+            offsets = tuple((s - 1) / 2 for s in strides)
         bank = tuple(f[:, None].float() for f in bank)
         references = tuple(bank[i] for i in self.mapping)
         context = {key: batch[key] for key in ("polar_K", "T_camera_from_model", "view_valid",
