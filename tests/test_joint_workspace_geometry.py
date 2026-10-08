@@ -6,6 +6,18 @@ from pointact.model.vla_pointact.joint_workspace_geometry import (
 from pointact.model.vla_pointact.action_head_3d.polar_depth_self_supervision import PolarDepthSelfSupervision
 
 
+def test_joint_recipe_dataset_schema():
+    from pathlib import Path
+    from pointact.data.schema import DataConfig, LerobotConfig
+    root = Path(__file__).resolve().parents[1]
+    recipe = root / "experiments/10_rlbench/data_configs/data-10task-polar-rlbench9-v2-cga-workspace-action.yaml"
+    dataset = DataConfig.from_yaml(str(recipe)).lerobot_datasets[0]
+    assert dataset.observed_operation_workspace is True
+    assert dataset.cga_input_mode == "native_cga"
+    legacy = LerobotConfig(repo_id="legacy")
+    assert not legacy.observed_operation_workspace and legacy.cga_input_mode == "robot"
+
+
 def test_native_cga_layout_integer_rays_and_stokes():
     images = torch.zeros(1, 1, 7, 8, 8)
     images[:, :, 0] = .8

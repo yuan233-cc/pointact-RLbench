@@ -67,6 +67,8 @@ class LerobotConfig:
     # Preserve current-observation pixel IDs through point row operations for
     # inherited-support fusion. Independent of material conditioning.
     use_point_image_support: bool = False
+    observed_operation_workspace: bool = False
+    cga_input_mode: str = "robot"  # robot, native_cga
     vlm_image_mode: str = "rgb"  # rgb, polar
     point_pixel_dirname: str | None = None
     material_profiles_file: str | None = None
